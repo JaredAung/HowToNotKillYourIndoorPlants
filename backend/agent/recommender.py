@@ -89,6 +89,58 @@ def compare_plants(plant_a: str, plant_b: str) -> str:
     return f"**{', '.join(p1.get('common', []) or [p1.get('latin', 'Unknown')])}**\n{a_str}\n\n**{', '.join(p2.get('common', []) or [p2.get('latin', 'Unknown')])}**\n{b_str}"
 
 
+def compare_plants_with_llm(
+    plant_a: str,
+    plant_b: str,
+    user_query: str,
+    profile_answers: Dict[str, Any],
+) -> str:
+    """Fetch both plants, then use LLM to generate a natural comparison. Includes user query and profile in prompt."""
+    coll = _get_plants_collection()
+    if coll is None:
+        return "MongoDB not configured. Cannot compare plants."
+    p1 = _find_plant_by_name(coll, plant_a)
+    p2 = _find_plant_by_name(coll, plant_b)
+    if not p1:
+        return f"Plant '{plant_a}' not found in the database."
+    if not p2:
+        return f"Plant '{plant_b}' not found in the database."
+    a_str = _format_plant(p1)
+    b_str = _format_plant(p2)
+    name_a = ", ".join(p1.get("common", []) or [p1.get("latin", "Unknown")])
+    name_b = ", ".join(p2.get("common", []) or [p2.get("latin", "Unknown")])
+
+    profile_str = ", ".join(f"{k}: {v}" for k, v in (profile_answers or {}).items() if v)
+    if not profile_str:
+        profile_str = "not provided"
+
+    system = f"""You are a plant care expert. Write a natural, helpful comparison of these two plants.
+
+User's question: {user_query or "Compare these plants"}
+
+User's profile/preferences: {profile_str}
+
+Plant data (use this to write your comparison):
+
+**{name_a}**
+{a_str}
+
+**{name_b}**
+{b_str}
+
+Write a clear comparison that addresses the user's question and relates to their profile when relevant. Use markdown for readability. Be concise but informative."""
+
+    llm = get_ollama_llm(temperature=0.3)
+    try:
+        resp = llm.invoke([
+            SystemMessage(content=system),
+            HumanMessage(content=user_query or "Compare these two plants."),
+        ])
+        return getattr(resp, "content", None) or f"**{name_a}**\n{a_str}\n\n**{name_b}**\n{b_str}"
+    except Exception as e:
+        return f"I had trouble generating the comparison. Here's the raw info:\n\n**{name_a}**\n{a_str}\n\n**{name_b}**\n{b_str}\n\n(Error: {e})"
+
+
 def _encode_user_from_profile(profile_answers: Dict[str, Any]) -> List[float]:
     """Encode user profile using trained UserTower. Uses vocabs from checkpoint (two_tower_vocabs.json)."""
     model, vocabs, _ = _load_two_tower()
@@ -314,10 +366,11 @@ def recommender_node(state: dict) -> dict:
         explanations = _parse_llm_recommendations(content, len(plants))
         for i, (p, expl) in enumerate(zip(plants, explanations)):
             name = ", ".join(p.get("common", []) or [p.get("latin", "Unknown")])
+            latin = p.get("latin", "") or name
             img = p.get("image_url") or p.get("img_url") or ""
             recommendations.append({"name": name, "image_url": img, "explanation": expl})
             plant_id = str(p.get("_id", "")) if p.get("_id") else ""
-            last_recommendations.append({"rank": i + 1, "name": name, "plant_id": plant_id})
+            last_recommendations.append({"rank": i + 1, "name": name, "plant_id": plant_id, "latin": latin})
 
     greeting = _extract_greeting(content)
     # If LLM skipped the greeting, prepend a fallback

@@ -31,7 +31,23 @@ from agent.profile_builder import (
     profile_init,
     profile_collector,
 )
-from agent.recommender import recommender_node, compare_plants
+from agent.recommender import compare_plants_with_llm, recommender_node
+from agent.expand import (
+    explain_plant_node,
+    has_single_plant_expand_selection,
+    resolve_single_plant,
+)
+
+
+def _get_user_garden_collection():
+    """Get MongoDB user garden collection."""
+    uri = os.getenv("MONGO_URI", "").strip().strip('"')
+    database = os.getenv("MONGO_DATABASE", "HowNotToKillYourPlants")
+    collection_name = os.getenv("MONGO_USER_GARDEN_COLLECTION", "UserGarden")
+    if not uri:
+        return None
+    client = MongoClient(uri)
+    return client[database][collection_name]
 
 
 def _get_user_profiles_collection():
@@ -99,6 +115,30 @@ def _infer_username_from_state(state: GraphState) -> str:
     return ""
 
 
+def _resolve_selection_by_names(user_msg: str, last_recs: list) -> Optional[list]:
+    """Extract plant names from message when user names them directly (e.g. 'croton and rose grape').
+    Returns [name, name] if 2+ names from last_recs found in message, else None. Case-insensitive."""
+    if not last_recs or len(last_recs) < 2:
+        return None
+    names = [r.get("name", "") for r in last_recs if r.get("name")]
+    if len(names) < 2:
+        return None
+    t = (user_msg or "").lower()
+    # Find which recommended names appear in the message (order of first mention)
+    found: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if name.lower() in t and name not in seen:
+            found.append(name)
+            seen.add(name)
+    return found[:2] if len(found) >= 2 else None
+
+
+def _has_named_plant_selection(text: str, last_recs: list) -> bool:
+    """True if user names 2+ plants from last_recommendations (e.g. 'compare croton and rose grape')."""
+    return _resolve_selection_by_names(text, last_recs) is not None
+
+
 def _has_selection_reference(text: str) -> bool:
     """Detect if user references selection (first 2, top 2, #2, second one, the vine one, etc.)."""
     t = (text or "").lower()
@@ -121,35 +161,47 @@ def _has_selection_reference(text: str) -> bool:
     return False
 
 
-def _has_compare_or_expand_intent(text: str) -> Tuple[bool, str]:
-    """Return (has_intent, action) where action is 'compare' or 'expand' or ''."""
+def _has_compare_or_expand_or_pick_intent(text: str) -> Tuple[bool, str]:
+    """Return (has_intent, action) where action is 'compare', 'expand', 'pick', or ''."""
     t = (text or "").lower()
     if "compare" in t:
         return True, "compare"
-    if any(x in t for x in ["recommend", "tell me more", "expand", "details about", "more about"]):
+    if any(x in t for x in ["pick", "take", "want", "add to my garden", "i'll have", "i'll take", "choose"]):
+        return True, "pick"
+    if any(x in t for x in ["recommend", "tell me more", "expand", "explain", "details about", "more about"]):
         return True, "expand"
     return False, ""
 
 
 def _route_at_start(state: GraphState) -> str:
-    """Route: pending -> profile_collector; selection ref + last_recs -> resolve_selection; filled -> recommender; else inject_context."""
+    """Route: pending -> profile_collector; expand/compare + last_recs -> resolve; filled -> recommender; else inject_context."""
     pending = state.get("pending_questions") or []
     profile_answers = state.get("profile_answers") or {}
     filled = any(v for v in profile_answers.values() if v and str(v).strip())
     last_recs = state.get("last_recommendations") or []
     user_msg = _get_last_user_message(state)
-    has_sel = _has_selection_reference(user_msg)
-    has_intent, action = _has_compare_or_expand_intent(user_msg)
+    has_sel = _has_selection_reference(user_msg) or _has_named_plant_selection(user_msg, last_recs)
+    has_intent, action = _has_compare_or_expand_or_pick_intent(user_msg)
+    has_expand_sel = has_single_plant_expand_selection(user_msg, last_recs)
+
+    has_pick_sel = has_single_plant_expand_selection(user_msg, last_recs)  # same resolution for pick
 
     if pending:
         dest = "profile_collector"
-    elif filled and len(last_recs) >= 2 and has_sel and has_intent:
-        dest = "resolve_selection"
+    elif filled and last_recs and has_intent:
+        if action == "expand" and has_expand_sel:
+            dest = "resolve_single_plant"
+        elif action == "pick" and has_pick_sel:
+            dest = "resolve_single_plant"
+        elif action == "compare" and has_sel:
+            dest = "resolve_selection"
+        else:
+            dest = "recommender"
     elif filled:
         dest = "recommender"
     else:
         dest = "inject_context"
-    print(f"[Route] pending={len(pending)}, filled={filled}, has_sel={has_sel} -> {dest}", flush=True)
+    print(f"[Route] pending={len(pending)}, filled={filled}, action={action}, has_sel={has_sel} -> {dest}", flush=True)
     return dest
 
 
@@ -239,6 +291,11 @@ def _resolve_selection_rules(user_msg: str, last_recs: list) -> Optional[list]:
     if len(names) < 2:
         return None
 
+    # Direct plant names: "croton and rose grape", "compare X and Y in terms of care"
+    by_names = _resolve_selection_by_names(user_msg, last_recs)
+    if by_names:
+        return by_names
+
     # "first 2", "top 2", "first two", "1 and 2"
     if re.search(r"\b(first|top|1st)\s*(2|two)\b", t) or "first two" in t or "first 2" in t or "top two" in t or "top 2" in t:
         return names[:2]
@@ -261,6 +318,9 @@ def _resolve_selection_rules(user_msg: str, last_recs: list) -> Optional[list]:
     if "third" in t or "3rd" in t:
         if n >= 3:
             return [names[2]]
+    # "last 2", "last two" - must come before generic "last"
+    if re.search(r"\blast\s*(2|two)\b", t) and n >= 2:
+        return names[-2:]
     if "last" in t and n >= 1:
         return [names[-1]]
     return None
@@ -298,17 +358,94 @@ Which plant(s) do they mean? Reply with ONLY the plant name(s), one per line, no
         except Exception:
             selected = names[:2]
 
-    if len(selected) < 2 and _has_compare_or_expand_intent(user_msg)[1] == "compare":
+    if len(selected) < 2 and _has_compare_or_expand_or_pick_intent(user_msg)[1] == "compare":
         selected = names[:2]
     return {"selected_plants": selected[:2]}
 
 
+def _route_after_resolve_single_plant(state: GraphState) -> str:
+    """After resolve_single_plant: pick intent -> pick_plant, else -> explain_plant."""
+    user_msg = _get_last_user_message(state)
+    _, action = _has_compare_or_expand_or_pick_intent(user_msg)
+    if action == "pick":
+        return "pick_plant"
+    return "explain_plant"
+
+
+def resolve_single_plant_node(state: GraphState) -> dict:
+    """Resolve one plant for expand intent (e.g. 'tell me more about the croton')."""
+    last_recs = state.get("last_recommendations") or []
+    user_msg = _get_last_user_message(state)
+    if not last_recs:
+        return {"messages": [AIMessage(content="I don't have recent recommendations. Would you like new ones?")], "selected_plants": []}
+    name = resolve_single_plant(user_msg, last_recs)
+    if not name:
+        return {"messages": [AIMessage(content="Which plant would you like to know more about? Say the name or 'first one', 'second one', etc.")], "selected_plants": []}
+    return {"selected_plants": [name]}
+
+
+def pick_plant_node(state: GraphState) -> dict:
+    """Add selected plant to user's garden in MongoDB. Ends the graph."""
+    username = (state.get("username") or "").strip()
+    selected = state.get("selected_plants") or []
+    last_recs = state.get("last_recommendations") or []
+
+    if not username:
+        return {
+            "messages": [AIMessage(content="I need to know your name to add plants to your garden.")],
+            "recommendations": [],
+            "greeting": None,
+        }
+    if not selected:
+        return {
+            "messages": [AIMessage(content="Which plant would you like to add? Say the name or 'first one', 'second one', etc.")],
+            "recommendations": [],
+            "greeting": None,
+        }
+
+    plant_name = selected[0]
+    rec = next((r for r in last_recs if (r.get("name") or "").lower() == plant_name.lower()), None)
+    if not rec:
+        rec = last_recs[0] if last_recs else {}
+    plant_id = rec.get("plant_id", "")
+    latin = rec.get("latin", plant_name)
+
+    coll = _get_user_garden_collection()
+    if coll is None:
+        return {
+            "messages": [AIMessage(content="MongoDB not configured. Cannot add to your garden.")],
+            "recommendations": [],
+            "greeting": None,
+        }
+
+    try:
+        coll.insert_one({
+            "username": username,
+            "latin": latin,
+            "plant_id": plant_id,
+        })
+        plant_display = plant_name or latin
+        return {
+            "messages": [AIMessage(content=f"Added **{plant_display}** to your garden! Happy planting! 🌱")],
+            "recommendations": [],
+            "greeting": None,
+        }
+    except Exception as e:
+        return {
+            "messages": [AIMessage(content=f"I had trouble adding to your garden. ({e})")],
+            "recommendations": [],
+            "greeting": None,
+        }
+
+
 def compare_selected_node(state: GraphState) -> dict:
-    """Compare the two selected plants using compare_plants tool."""
+    """Compare the two selected plants using LLM for natural language output."""
     selected = state.get("selected_plants") or []
     if len(selected) < 2:
         return {"messages": [AIMessage(content="I need two plants to compare. Which would you like?")], "recommendations": [], "greeting": None}
-    result = compare_plants.invoke({"plant_a": selected[0], "plant_b": selected[1]})
+    user_query = _get_last_user_message(state)
+    profile_answers = state.get("profile_answers") or {}
+    result = compare_plants_with_llm(selected[0], selected[1], user_query, profile_answers)
     return {
         "messages": [AIMessage(content=str(result))],
         "recommendations": [],
@@ -320,7 +457,7 @@ def _route_after_resolve_selection(state: GraphState) -> str:
     """After resolve_selection: compare if 2 selected, else end."""
     selected = state.get("selected_plants") or []
     user_msg = _get_last_user_message(state)
-    _, action = _has_compare_or_expand_intent(user_msg)
+    _, action = _has_compare_or_expand_or_pick_intent(user_msg)
     if len(selected) >= 2 and action == "compare":
         return "compare_selected"
     return "end"
@@ -358,7 +495,10 @@ graph.add_node("profile_init", profile_init)
 graph.add_node("profile_collector", profile_collector)
 graph.add_node("recommender", recommender_node)
 graph.add_node("resolve_selection", resolve_selection_node)
+graph.add_node("resolve_single_plant", resolve_single_plant_node)
 graph.add_node("compare_selected", compare_selected_node)
+graph.add_node("explain_plant", explain_plant_node)
+graph.add_node("pick_plant", pick_plant_node)
 graph.add_conditional_edges(
     START,
     _route_at_start,
@@ -367,8 +507,16 @@ graph.add_conditional_edges(
         "recommender": "recommender",
         "inject_context": "inject_context",
         "resolve_selection": "resolve_selection",
+        "resolve_single_plant": "resolve_single_plant",
     },
 )
+graph.add_conditional_edges(
+    "resolve_single_plant",
+    _route_after_resolve_single_plant,
+    {"explain_plant": "explain_plant", "pick_plant": "pick_plant"},
+)
+graph.add_edge("explain_plant", END)
+graph.add_edge("pick_plant", END)
 graph.add_conditional_edges(
     "resolve_selection",
     _route_after_resolve_selection,
