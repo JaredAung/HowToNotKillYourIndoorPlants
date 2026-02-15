@@ -67,7 +67,8 @@ def check_user_profile_exists(username: str) -> str:
     coll = _get_user_profiles_collection()
     if coll is None:
         return "MongoDB not configured. MONGO_URI not set."
-    doc = coll.find_one({"username": username})
+    # Case-insensitive lookup (DB may have "jared" while user typed "Jared")
+    doc = coll.find_one({"username": {"$regex": f"^{re.escape(username)}$", "$options": "i"}})
     if doc:
         prefs = doc.get("preferences", {})
         summary = ", ".join(f"{k}: {v}" for k, v in prefs.items() if v) if prefs else "no preferences stored"
@@ -115,22 +116,38 @@ def _infer_username_from_state(state: GraphState) -> str:
     return ""
 
 
+def _rec_matches_user_input(rec: dict, t: str) -> bool:
+    """True if user message contains Latin name or any common name."""
+    latin = (rec.get("name") or rec.get("latin") or "").lower()
+    if latin and latin in t:
+        return True
+    common_list = rec.get("common") or []
+    if isinstance(common_list, str):
+        common_list = [common_list] if common_list else []
+    for c in common_list:
+        if c and str(c).lower() in t:
+            return True
+    return False
+
+
 def _resolve_selection_by_names(user_msg: str, last_recs: list) -> Optional[list]:
     """Extract plant names from message when user names them directly (e.g. 'croton and rose grape').
-    Returns [name, name] if 2+ names from last_recs found in message, else None. Case-insensitive."""
+    Returns [latin_name, latin_name] if 2+ plants from last_recs found in message, else None.
+    Matches by Latin or common name. Case-insensitive."""
     if not last_recs or len(last_recs) < 2:
         return None
-    names = [r.get("name", "") for r in last_recs if r.get("name")]
-    if len(names) < 2:
-        return None
     t = (user_msg or "").lower()
-    # Find which recommended names appear in the message (order of first mention)
+    # Find which recommended plants appear in the message (order of first mention)
+    # Return Latin names for selected_plants
     found: list[str] = []
     seen: set[str] = set()
-    for name in names:
-        if name.lower() in t and name not in seen:
-            found.append(name)
-            seen.add(name)
+    for rec in last_recs:
+        latin = rec.get("name") or rec.get("latin", "")
+        if not latin or latin in seen:
+            continue
+        if _rec_matches_user_input(rec, t):
+            found.append(latin)
+            seen.add(latin)
     return found[:2] if len(found) >= 2 else None
 
 
@@ -173,8 +190,19 @@ def _has_compare_or_expand_or_pick_intent(text: str) -> Tuple[bool, str]:
     return False, ""
 
 
+def _has_profile_check_result(state: GraphState, result: str) -> bool:
+    """True if we have a ToolMessage from check_profile with the given result (exists/not_found)."""
+    for m in reversed(state.get("messages", [])):
+        if not _is_tool_message(m):
+            continue
+        content = getattr(m, "content", None) or (m.get("content") if isinstance(m, dict) else "") or ""
+        if result in str(content):
+            return True
+    return False
+
+
 def _route_at_start(state: GraphState) -> str:
-    """Route: pending -> profile_collector; expand/compare + last_recs -> resolve; filled -> recommender; else inject_context."""
+    """Route: pending -> profile_collector (only if profile not_found); else check profile first; filled -> recommender."""
     pending = state.get("pending_questions") or []
     profile_answers = state.get("profile_answers") or {}
     filled = any(v for v in profile_answers.values() if v and str(v).strip())
@@ -186,7 +214,9 @@ def _route_at_start(state: GraphState) -> str:
 
     has_pick_sel = has_single_plant_expand_selection(user_msg, last_recs)  # same resolution for pick
 
-    if pending:
+    # Only go to profile_collector if we've already checked and profile was not_found.
+    # Otherwise we must run inject_context -> check_profile first.
+    if pending and _has_profile_check_result(state, "not_found"):
         dest = "profile_collector"
     elif filled and last_recs and has_intent:
         if action == "expand" and has_expand_sel:
@@ -471,11 +501,12 @@ def load_profile_from_db(state: GraphState) -> dict:
     coll = _get_user_profiles_collection()
     if coll is None:
         return {}
-    doc = coll.find_one({"username": username})
+    doc = coll.find_one({"username": {"$regex": f"^{re.escape(username)}$", "$options": "i"}})
     if not doc:
         return {}
     prefs = doc.get("preferences", {}) or {}
-    return {"profile_answers": prefs, "username": username}
+    stored_username = doc.get("username", username)
+    return {"profile_answers": prefs, "username": stored_username}
 
 
 def _route_after_profile_collector(state: GraphState) -> str:

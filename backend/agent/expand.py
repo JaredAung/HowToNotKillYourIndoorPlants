@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
 from agent.llm import get_ollama_llm
-from agent.recommender import _find_plant_by_name, _format_plant, _get_plants_collection
+from agent.recommender import _find_plant_by_name, _format_plant, _get_latin_name, _get_plants_collection
 
 
 @tool
@@ -23,7 +23,7 @@ def get_plant_details(plant_name: str) -> str:
     p = _find_plant_by_name(coll, plant_name)
     if not p:
         return f"Plant '{plant_name}' not found in the database."
-    name = ", ".join(p.get("common", []) or [p.get("latin", "Unknown")])
+    name = _get_latin_name(p)
     details = _format_plant(p)
     return f"**{name}**\n{details}"
 
@@ -40,7 +40,7 @@ def explain_plant_with_llm(
     p = _find_plant_by_name(coll, plant_name)
     if not p:
         return f"Plant '{plant_name}' not found in the database."
-    name = ", ".join(p.get("common", []) or [p.get("latin", "Unknown")])
+    name = _get_latin_name(p)
     details = _format_plant(p)
 
     profile_str = ", ".join(f"{k}: {v}" for k, v in (profile_answers or {}).items() if v)
@@ -71,10 +71,24 @@ Write a clear explanation that addresses the user's question and relates to thei
         return f"I had trouble generating the explanation. Here's the raw info:\n\n**{name}**\n{details}\n\n(Error: {e})"
 
 
+def _rec_matches_user_input(rec: dict, t: str) -> bool:
+    """True if user message contains Latin name or any common name."""
+    latin = (rec.get("name") or rec.get("latin") or "").lower()
+    if latin and latin in t:
+        return True
+    common_list = rec.get("common") or []
+    if isinstance(common_list, str):
+        common_list = [common_list] if common_list else []
+    for c in common_list:
+        if c and str(c).lower() in t:
+            return True
+    return False
+
+
 def resolve_single_plant(user_msg: str, last_recs: list) -> Optional[str]:
     """Resolve user reference to a single plant for expand intent.
     Handles: 'the first one', 'croton', 'details about #2', etc.
-    Returns plant name or None."""
+    Returns Latin name (for display) or None."""
     if not last_recs:
         return None
     names = [r.get("name", "") for r in last_recs if r.get("name")]
@@ -83,10 +97,10 @@ def resolve_single_plant(user_msg: str, last_recs: list) -> Optional[str]:
     t = (user_msg or "").lower()
     n = len(names)
 
-    # By name: "tell me more about the croton", "details about rose grape"
-    for name in names:
-        if name.lower() in t:
-            return name
+    # By name: "tell me more about the croton", "details about rose grape" - match Latin or common
+    for rec in last_recs:
+        if _rec_matches_user_input(rec, t):
+            return rec.get("name") or rec.get("latin", "")
 
     # Positional: "first one", "second", "#2", "the last one"
     if re.search(r"\b(first|1st)\s*(one|plant)?\b", t) or "first one" in t:

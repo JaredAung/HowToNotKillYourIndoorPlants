@@ -55,6 +55,7 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([INITIAL_MESSAGE]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [progressLabel, setProgressLabel] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -68,9 +69,10 @@ export default function Home() {
     setInput("");
     setMessages((m) => [...m, { role: "user", text }]);
     setLoading(true);
+    setProgressLabel(null);
 
     try {
-      const res = await fetch(`${API_URL}/api/chat`, {
+      const res = await fetch(`${API_URL}/api/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, session_id: sessionId }),
@@ -78,26 +80,68 @@ export default function Home() {
 
       if (!res.ok) throw new Error(res.statusText);
 
-      const data = await res.json();
-      setSessionId(data.session_id);
-      const recs = normalizeRecommendations(data.recommendations);
-      const greeting = typeof data.greeting === "string" ? data.greeting.trim() : "";
-      const responseText = typeof data.response === "string" ? data.response : "";
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      if (!reader) throw new Error("No response body");
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const payload = JSON.parse(line.slice(6));
+              if (payload.type === "progress") {
+                setProgressLabel(payload.label ?? "Working...");
+              } else if (payload.type === "done") {
+                const data = payload.data;
+                setSessionId(data.session_id);
+                const recs = normalizeRecommendations(data.recommendations ?? []);
+                const greeting =
+                  typeof data.greeting === "string" ? data.greeting.trim() : "";
+                const responseText =
+                  typeof data.response === "string" ? data.response : "";
+                setMessages((m) => [
+                  ...m,
+                  {
+                    role: "assistant",
+                    text: greeting || responseText,
+                    recommendations: recs.length > 0 ? recs : undefined,
+                  },
+                ]);
+              } else if (payload.type === "error") {
+                setMessages((m) => [
+                  ...m,
+                  {
+                    role: "assistant",
+                    text: `Error: ${payload.message ?? "Something went wrong"}`,
+                  },
+                ]);
+              }
+            } catch {
+              // ignore parse errors for partial chunks
+            }
+          }
+        }
+      }
+    } catch {
       setMessages((m) => [
         ...m,
         {
           role: "assistant",
-          text: greeting || responseText,
-          recommendations: recs.length > 0 ? recs : undefined,
+          text: "Could not connect to the server. Is the backend running?",
         },
-      ]);
-    } catch {
-      setMessages((m) => [
-        ...m,
-        { role: "assistant", text: "Could not connect to the server. Is the backend running?" },
       ]);
     } finally {
       setLoading(false);
+      setProgressLabel(null);
     }
   };
 
@@ -205,10 +249,17 @@ export default function Home() {
                   <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" />
                 </svg>
               </div>
-              <div className="flex items-center gap-1 rounded-2xl bg-zinc-100 px-4 py-3 dark:bg-zinc-800">
-                <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.3s]" />
-                <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.15s]" />
-                <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400" />
+              <div className="flex flex-col gap-1 rounded-2xl bg-zinc-100 px-4 py-3 dark:bg-zinc-800">
+                <div className="flex items-center gap-1">
+                  <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.3s]" />
+                  <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400 [animation-delay:-0.15s]" />
+                  <span className="h-2 w-2 animate-bounce rounded-full bg-zinc-400" />
+                </div>
+                {progressLabel && (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {progressLabel}
+                  </p>
+                )}
               </div>
             </div>
           )}

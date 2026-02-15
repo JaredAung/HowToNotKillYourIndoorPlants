@@ -58,6 +58,11 @@ def _get_plants_collection():
     return MongoClient(uri)[database][PLANTS_COLLECTION]
 
 
+def _get_latin_name(p: dict) -> str:
+    """Return Latin (scientific) name for display. Use only Latin, not common names."""
+    return (p.get("latin") or "").strip() or "Unknown"
+
+
 def _find_plant_by_name(coll, name: str) -> Optional[Dict[str, Any]]:
     """Find a plant by common or latin name (case-insensitive, partial match)."""
     name = (name or "").strip()
@@ -86,7 +91,7 @@ def compare_plants(plant_a: str, plant_b: str) -> str:
         return f"Plant '{plant_b}' not found in the database."
     a_str = _format_plant(p1)
     b_str = _format_plant(p2)
-    return f"**{', '.join(p1.get('common', []) or [p1.get('latin', 'Unknown')])}**\n{a_str}\n\n**{', '.join(p2.get('common', []) or [p2.get('latin', 'Unknown')])}**\n{b_str}"
+    return f"**{_get_latin_name(p1)}**\n{a_str}\n\n**{_get_latin_name(p2)}**\n{b_str}"
 
 
 def compare_plants_with_llm(
@@ -107,8 +112,8 @@ def compare_plants_with_llm(
         return f"Plant '{plant_b}' not found in the database."
     a_str = _format_plant(p1)
     b_str = _format_plant(p2)
-    name_a = ", ".join(p1.get("common", []) or [p1.get("latin", "Unknown")])
-    name_b = ", ".join(p2.get("common", []) or [p2.get("latin", "Unknown")])
+    name_a = _get_latin_name(p1)
+    name_b = _get_latin_name(p2)
 
     profile_str = ", ".join(f"{k}: {v}" for k, v in (profile_answers or {}).items() if v)
     if not profile_str:
@@ -149,7 +154,7 @@ def _encode_user_from_profile(profile_answers: Dict[str, Any]) -> List[float]:
 
 
 def _format_plant(p: dict) -> str:
-    common = ", ".join(p.get("common", []) or [p.get("latin", "Unknown")])
+    latin = _get_latin_name(p)
     climate = p.get("climate", "")
     size = p.get("size_bucket", "")
     use = ", ".join(p.get("use", []) or [])
@@ -159,7 +164,7 @@ def _format_plant(p: dict) -> str:
     desc = p.get("description") or {}
     physical = (desc.get("physical", "") or "")[:100] if isinstance(desc, dict) else ""
     return (
-        f"- **{common}** (climate: {climate}, size: {size}, use: {use}, care: {care})\n"
+        f"- **{latin}** (climate: {climate}, size: {size}, use: {use}, care: {care})\n"
         f"  Light: {light}\n  Watering: {watering}\n  {physical}"
     )
 
@@ -233,7 +238,7 @@ def _two_tower_retrieve(
                 None,
             )
         raise
-    names = [", ".join(p.get("common", []) or [p.get("latin", "Unknown")]) for p in top]
+    names = [_get_latin_name(p) for p in top]
     print(f"Two-tower recommended plants (top_k={top_k}, count={len(top)}): {names}")
     plants_str = "\n\n".join(_format_plant(p) for p in top) if top else "No matching plants found."
     return plants_str, top if top else None
@@ -348,6 +353,7 @@ def recommender_node(state: dict) -> dict:
         f"{greeting_instruction}"
         "Then present 3 of the retrieved plants with why each fits their profile and one care tip. "
         "Use numbered format: 1. **Plant name**: explanation... * Care tip: ... "
+        "Use only the Latin (scientific) names from the plant data above, not common names. "
         "Do NOT add sign-off phrases like 'Let me know if you have any questions' at the end."
     )
     llm = get_ollama_llm(temperature=0.5)
@@ -365,12 +371,17 @@ def recommender_node(state: dict) -> dict:
     if plants:
         explanations = _parse_llm_recommendations(content, len(plants))
         for i, (p, expl) in enumerate(zip(plants, explanations)):
-            name = ", ".join(p.get("common", []) or [p.get("latin", "Unknown")])
-            latin = p.get("latin", "") or name
+            latin = _get_latin_name(p)
+            common_list = p.get("common") or []
+            if isinstance(common_list, str):
+                common_list = [common_list] if common_list else []
             img = p.get("image_url") or p.get("img_url") or ""
-            recommendations.append({"name": name, "image_url": img, "explanation": expl})
+            recommendations.append({"name": latin, "image_url": img, "explanation": expl})
             plant_id = str(p.get("_id", "")) if p.get("_id") else ""
-            last_recommendations.append({"rank": i + 1, "name": name, "plant_id": plant_id, "latin": latin})
+            last_recommendations.append({
+                "rank": i + 1, "name": latin, "plant_id": plant_id, "latin": latin,
+                "common": common_list,  # for matching user input like "croton"
+            })
 
     greeting = _extract_greeting(content)
     # If LLM skipped the greeting, prepend a fallback
