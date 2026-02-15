@@ -142,12 +142,21 @@ def watering_to_tags(watering_text: Any) -> List[str]:
       - watering_level:low|medium|high
       - drought_tolerant:true|false
       - watering_pattern:dry_between|keep_moist
+    Accepts explicit levels: "low", "moderate", "medium", "high" (for user profile).
     """
     if not watering_text:
         return ["watering_level:medium", "drought_tolerant:false"]
 
     s = str(watering_text).strip().lower()
     tags: List[str] = []
+
+    # Explicit level keywords (for user profile: low/moderate/high)
+    if s in ("low", "medium", "moderate", "high"):
+        if s == "low":
+            return ["watering_level:low", "drought_tolerant:true"]
+        if s in ("medium", "moderate"):
+            return ["watering_level:medium", "drought_tolerant:false"]
+        return ["watering_level:high", "drought_tolerant:false"]
 
     keep_moist = ("keep moist" in s) or ("must not be dry" in s)
     dry_between = ("dry between" in s) or ("allow to dry" in s)
@@ -1238,7 +1247,6 @@ def profile_answers_to_user_raw(profile_answers: Dict[str, Any]) -> Dict[str, An
     use_val = raw.get("use")
     if use_val is not None and not isinstance(use_val, list):
         raw["use"] = [use_val] if use_val else []
-    raw.setdefault("light_availability", raw.get("average_sunlight_type"))
     raw.setdefault("room_size", raw.get("max_plant_size_preference"))
     raw.setdefault("has_pets", False)
     # Parse average_room_temp if string (e.g. "25", "25°C", "77°F")

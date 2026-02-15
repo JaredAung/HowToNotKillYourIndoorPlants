@@ -1,113 +1,399 @@
 """
-Profile collection for plant recommendations.
-Collects user preferences before running the recommender.
+Profile builder agent: schema, extraction, and profile collection logic.
+Collects user plant preferences via freeform text + follow-up questions.
 """
-from typing import Any
+import json
+import os
+import re
+from typing import Any, Optional
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from pymongo import MongoClient
 
-FREEFORM_SENTINEL = "__FREEFORM__"
+from agent.llm import get_ollama_llm
 
-# Question keys used by the two-tower model (profile_answers_to_user_raw)
-PROFILE_QUESTIONS = [
-    "experience_level",
-    "climate",
-    "light_availability",
-    "room_size",
-    "has_pets",
-    "time_to_commit",
-    "average_room_temp",
-    "use",
-    "watering_preferences",
+# Valid use values from house_plants_enriched_schema.json (placement/style)
+USE_VALUES = [
+    "Colors / Forms", "Flower", "Ground cover", "Hanging", "Potted plant",
+    "Primary", "Secondary", "Table top", "Tertiary",
 ]
 
+# Valid climate values from house_plants_enriched_schema.json
+CLIMATE_VALUES = [
+    "Arid Tropical", "Subtropical", "Subtropical arid", "Tropical",
+    "Tropical humid", "Tropical to subtropical",
+]
 
-def get_profile_questions() -> list[str]:
-    """Return ordered list of profile question keys."""
-    return list(PROFILE_QUESTIONS)
+# User profile schema - fields to collect for plant recommendations
+USER_PROFILE_SCHEMA = {
+    "experience_level": "plant care experience (beginner, intermediate, expert)",
+    "time_to_commit": "time available for plant care per week",
+    "symbolism": "why they want plants (decor, air quality, hobby)",
+    "use": "placement/style: one of " + ", ".join(USE_VALUES),
+    "climate": "climate zone: one of " + ", ".join(CLIMATE_VALUES),
+    "average_room_temp": "typical room temperature (celsius or fahrenheit)",
+    "light_availability": "type of sunlight (direct_sun, bright_indirect, medium, low)",
+    "average_sunlight_time": "hours of sunlight per day",
+    "watering_preferences": "watering frequency preference (frequent, moderate, minimal)",
+    "humidity_level": "humidity level (dry, moderate, humid)",
+    "max_plant_size_preference": "max preferred plant size (small, medium, large)",
+    "physical_desc": "optional: user's preference for how the plant should look (e.g. bright leaves, tall, trailing, colorful, variegated). Only extract if mentioned.",
+    "username": "person's name from 'I'm X', 'My name is X', etc. Only extract if mentioned.",
+}
 
+# Map each question to its schema key (must match PROFILE_QUESTIONS 1:1)
+QUESTION_TO_SCHEMA_KEY = [
+    "experience_level", "time_to_commit", "symbolism",
+    "use", "climate", "average_room_temp", "light_availability", "average_sunlight_time",
+    "watering_preferences", "humidity_level", "max_plant_size_preference",
+]
 
-def _get_last_user_message(state: dict) -> str:
-    """Extract last user message content."""
-    for m in reversed(state.get("messages", [])):
-        role = getattr(m, "type", None) or getattr(m, "role", None) or (m.get("role") if isinstance(m, dict) else None)
-        if role in ("human", "user"):
-            return getattr(m, "content", None) or (m.get("content") if isinstance(m, dict) else "") or ""
-    return ""
+PROFILE_QUESTIONS = [
+    "What's your plant care experience level? (beginner, intermediate, expert)",
+    "How much time can you commit to plant care per week?",
+    "What motivates you to get plants? (e.g. decor, air quality, hobby)",
+    "What placement or style do you want? (Potted plant, Table top, Hanging, Flower, Ground cover, Colors/Forms, Primary, Secondary, Tertiary)",
+    "What's your local climate? (Tropical, Tropical humid, Subtropical, Arid Tropical, etc.)",
+    "What's the average room temperature? (celsius or fahrenheit)",
+    "What type of sunlight does your space get? (direct, indirect, low, bright)",
+    "How many hours of sunlight per day does your space get?",
+    "What's your watering preference? (frequent, moderate, minimal)",
+    "What's the humidity level? (dry, moderate, humid)",
+    "What's your max preferred plant size? (small, medium, large)",
+]
 
+FREEFORM_SENTINEL = "__freeform__"
 
-def profile_init(state: dict) -> dict:
-    """Initialize profile collection. Sets pending_questions if not already set."""
-    pending = state.get("pending_questions") or []
-    if not pending:
-        questions = get_profile_questions()
-        return {"pending_questions": list(questions)}
-    return {}
-
-
-# Valid answers for experience_level (so we don't treat "new" or "beginner" as a name)
-EXPERIENCE_KEYWORDS = frozenset({
-    "beginner", "intermediate", "advanced", "new", "novice", "expert",
-    "beginning", "starting", "low", "medium", "high",
-})
-
-QUESTION_LABELS = {
-    "experience_level": "What's your plant care experience? (beginner/intermediate/advanced)",
-    "climate": "What's your climate? (tropical/temperate/dry/etc.)",
-    "light_availability": "How much light do you have? (low/medium/bright)",
-    "room_size": "What's your room size? (small/medium/large)",
-    "has_pets": "Do you have pets? (yes/no)",
-    "time_to_commit": "How much time can you commit? (low/medium/high)",
-    "average_room_temp": "Average room temperature? (e.g. 22°C or 72°F)",
-    "use": "What do you want plants for? (e.g. air purification, decoration)",
-    "watering_preferences": "Watering preference? (e.g. low maintenance, regular)",
+# Map extracted keys (LLM may use alternate names) to schema key
+EXTRACTED_KEY_TO_SCHEMA = {
+    "average_sunlight_type": "light_availability",
+    "room_size": "max_plant_size_preference",
 }
 
 
-def profile_collector(state: dict) -> dict:
-    """Collect one profile answer from the last user message."""
-    pending = state.get("pending_questions") or []
-    profile_answers = dict(state.get("profile_answers") or {})
-    user_msg = _get_last_user_message(state).strip()
+def get_profile_questions() -> list[str]:
+    """Returns profile questions as list (for API and session init)."""
+    return list(PROFILE_QUESTIONS)
 
-    if not pending:
+
+def _extract_json_from_response(raw: str) -> Optional[dict]:
+    """Extract JSON object from LLM response (handles markdown, extra text)."""
+    raw = (raw or "").strip()
+    if "```" in raw:
+        parts = raw.split("```")
+        for p in parts:
+            p = p.strip()
+            if p.lower().startswith("json"):
+                p = p[4:].strip()
+            if p.startswith("{"):
+                raw = p
+                break
+    start = raw.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for i, c in enumerate(raw[start:], start):
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(raw[start : i + 1])
+                except json.JSONDecodeError:
+                    pass
+    return None
+
+
+def _extract_fields_rule_based(text: str) -> dict[str, Any]:
+    """Rule-based fallback extraction when LLM fails. Two-tower handles normalization."""
+    import re
+    t = (text or "").lower()
+    out: dict[str, Any] = {}
+    # experience_level
+    if "beginner" in t or "novice" in t or "new" in t:
+        out["experience_level"] = "beginner"
+    elif "intermediate" in t or "moderate" in t:
+        out["experience_level"] = "intermediate"
+    elif "expert" in t or "advanced" in t:
+        out["experience_level"] = "expert"
+    # climate
+    for c in ("tropical humid", "tropical to subtropical", "arid tropical", "subtropical arid", "subtropical", "tropical"):
+        if c in t:
+            out["climate"] = c.title()
+            break
+    # light_availability (two-tower canonical: direct_sun, bright_indirect, medium, low)
+    if "direct" in t or "full sun" in t:
+        out["light_availability"] = "direct_sun"
+    elif "indirect" in t or "bright" in t:
+        out["light_availability"] = "bright_indirect"
+    elif "low" in t and ("light" in t or "sun" in t):
+        out["light_availability"] = "low"
+    # average_sunlight_time (hours)
+    m = re.search(r"(\d+)\s*(?:hours?|hrs?)\s*(?:per|a|each)\s*day", t)
+    if not m:
+        m = re.search(r"(\d+)\s*(?:hours?|hrs?)\s*(?:of\s+)?(?:sun|light)", t)
+    if not m:
+        m = re.search(r"(?:sunlight|sun|light)\s*(?:for\s+)?(\d+)\s*(?:hours?|hrs?)?", t)
+    if m:
+        out["average_sunlight_time"] = m.group(1)
+    # humidity_level (two-tower expects low/medium/high)
+    if "very humid" in t or "high humidity" in t or "humid" in t:
+        out["humidity_level"] = "high"
+    elif "dry" in t:
+        out["humidity_level"] = "low"
+    elif "moderate" in t:
+        out["humidity_level"] = "medium"
+    # watering_preferences
+    if "low maintenance" in t or "minimal" in t or "drought" in t:
+        out["watering_preferences"] = "minimal"
+    elif "frequent" in t or "regular" in t:
+        out["watering_preferences"] = "frequent"
+    elif "moderate" in t or "medium" in t:
+        out["watering_preferences"] = "moderate"
+    # max_plant_size_preference
+    if "small" in t and ("plant" in t or "space" in t or "room" in t):
+        out["max_plant_size_preference"] = "small"
+    elif "large" in t and ("plant" in t or "space" in t or "room" in t):
+        out["max_plant_size_preference"] = "large"
+    elif "medium" in t and ("plant" in t or "space" in t or "room" in t):
+        out["max_plant_size_preference"] = "medium"
+    return out
+
+
+def _extract_fields_from_text(text: str) -> dict[str, Any]:
+    """Use LLM to extract schema fields from user's freeform text. Returns dict of key -> value."""
+    text = (text or "").strip()
+    if not text:
         return {}
+    llm = get_ollama_llm(temperature=0.2)
+    keys = [k for k in USER_PROFILE_SCHEMA.keys() if k not in ("physical_desc", "username")]
+    keys.append("username")  # Extract name if mentioned
+    prompt = f"""Extract plant-care profile fields from this text. Return a JSON object with these keys (use null if not mentioned).
 
-    current_key = pending[0]
+CRITICAL: Do NOT infer or guess. Only include a field if the user explicitly mentions it.
+E.g. location does NOT imply room temp, sunlight, or experience level. "Desk plant" is use only—NOT physical_desc. "Dry climate" is climate only—NOT watering. Use null for anything not directly stated.
 
-    # If first message looks like a name (short, no question answered yet), ask first question.
-    # But don't treat valid experience answers like "new" or "beginner" as a name.
-    if not profile_answers and user_msg and len(user_msg) <= 50 and "\n" not in user_msg:
-        msg_lower = user_msg.lower().strip()
-        is_experience_answer = (
-            current_key == "experience_level"
-            and (msg_lower in EXPERIENCE_KEYWORDS or msg_lower.startswith(("beginner", "intermediate", "advanced", "new")))
-        )
-        if not is_experience_answer:
-            next_question = QUESTION_LABELS.get(current_key, f"What is your {current_key.replace('_', ' ')}?")
-            return {"messages": [AIMessage(content=next_question)]}
+Keys: {keys}
 
-    value = user_msg if user_msg else None
+Examples from text:
+- mention of temperature -> average_room_temp: "40°C"
+- mention of sunlight type -> light_availability: "direct_sun" or "bright_indirect" or "medium" or "low"
+- mention of sunlight hours -> average_sunlight_time: "4"
+- mention of plant size -> max_plant_size_preference: "small"
+- mention of plant description -> physical_desc: "bright leaves" or "tall" or "trailing"
+- mention of experience level -> experience_level: "beginner"
+- mention of use -> use: "Table top" or "Potted plant"
+- mention of climate -> climate: "Subtropical" or "Tropical humid"
+- mention of name (I'm X, my name is X) -> username: "X"
 
-    if value:
-        profile_answers[current_key] = value
-        new_pending = pending[1:]
-    else:
-        new_pending = pending
+User text: "{text}"
 
-    next_question = None
-    if new_pending:
-        key = new_pending[0]
-        next_question = QUESTION_LABELS.get(key, f"What is your {key.replace('_', ' ')}?")
+Return ONLY valid JSON, no other text."""
+    try:
+        resp = llm.invoke([HumanMessage(content=prompt)])
+        raw_resp = getattr(resp, "content", None) or ""
+        data = _extract_json_from_response(raw_resp)
+        if data is None:
+            print("[Extract] Failed to parse JSON. Raw response:", raw_resp[:500])
+            return {}
+        result: dict[str, Any] = {}
+        for k, v in data.items():
+            if k not in USER_PROFILE_SCHEMA and k != "username":
+                continue
+            if v is None or (isinstance(v, str) and not v.strip()):
+                continue
+            if isinstance(v, str):
+                result[k] = v.strip()
+            else:
+                result[k] = str(v).strip() if v else None
+        if result:
+            return result
+    except Exception as e:
+        print("[Extract] LLM Error:", e)
+    # Fallback: rule-based extraction when LLM fails or returns empty
+    fallback = _extract_fields_rule_based(text)
+    if fallback:
+        print("[Extract] Using rule-based fallback:", fallback)
+    return fallback
 
-    updates: dict[str, Any] = {
-        "profile_answers": profile_answers,
-        "pending_questions": new_pending,
+
+def _extract_username_from_messages(messages: list) -> Optional[str]:
+    """Extract username from check_user_profile_exists tool call or first short human message."""
+    for m in reversed(messages):
+        tool_calls = getattr(m, "tool_calls", None) or []
+        for tc in tool_calls:
+            name = getattr(tc, "name", None) or (tc.get("name") if isinstance(tc, dict) else None)
+            if name == "check_user_profile_exists":
+                args = getattr(tc, "args", None) or (tc.get("args") if isinstance(tc, dict) else {}) or {}
+                if isinstance(args, dict) and "username" in args:
+                    return args["username"]
+    for m in messages:
+        role = getattr(m, "type", None) or getattr(m, "role", None) or (m.get("role") if isinstance(m, dict) else None)
+        if role in ("human", "user"):
+            content = getattr(m, "content", None) or (m.get("content") if isinstance(m, dict) else None)
+            if content and isinstance(content, str) and len(content.strip()) < 50:
+                return content.strip()
+    return None
+
+
+def _get_last_user_content(messages: list) -> Optional[str]:
+    """Extract content of last user/human message."""
+    for m in reversed(messages):
+        content = getattr(m, "content", None)
+        if content is None and isinstance(m, dict):
+            content = m.get("content")
+        if content:
+            role = getattr(m, "type", None) or getattr(m, "role", None)
+            if role is None and isinstance(m, dict):
+                role = m.get("role", m.get("type"))
+            if role in ("human", "user"):
+                return str(content)
+    return None
+
+
+def _init_profile_null() -> dict:
+    """Initialize all schema fields to null."""
+    return {k: None for k in QUESTION_TO_SCHEMA_KEY}
+
+
+def _get_null_fields(answers: dict) -> list[str]:
+    """Return schema keys that are still null (need to be asked)."""
+    return [k for k in QUESTION_TO_SCHEMA_KEY if answers.get(k) is None or str(answers.get(k) or "").strip() == ""]
+
+
+def _get_user_profiles_collection():
+    """Get MongoDB user profiles collection."""
+    uri = os.getenv("MONGO_URI", "").strip().strip('"')
+    database = os.getenv("MONGO_DATABASE", "HowNotToKillYourPlants")
+    collection_name = os.getenv("MONGO_USER_PROFILES_COLLECTION", "UserProfiles")
+    if not uri:
+        return None
+    client = MongoClient(uri)
+    return client[database][collection_name]
+
+
+def _save_profile_to_db(username: str, preferences: dict) -> None:
+    """Upsert user profile (username + preferences) to MongoDB."""
+    if not username or not preferences:
+        return
+    coll = _get_user_profiles_collection()
+    if coll is None:
+        return
+    try:
+        doc = coll.find_one({"username": {"$regex": f"^{re.escape(username)}$", "$options": "i"}})
+        if doc:
+            coll.update_one({"_id": doc["_id"]}, {"$set": {"username": username.strip(), "preferences": preferences}})
+        else:
+            coll.insert_one({"username": username.strip(), "preferences": preferences})
+    except Exception as e:
+        print(f"[ProfileBuilder] Failed to save profile: {e}", flush=True)
+
+
+def _complete_profile(answers: dict, username: str) -> dict:
+    """Save profile to Mongo, reiterate captured info, return completion state."""
+    filled = {k: v for k, v in answers.items() if v is not None and str(v).strip()}
+    if username and filled:
+        _save_profile_to_db(username, filled)
+    profile_summary = "\n".join(f"  • {k}: {v}" for k, v in filled.items())
+    completion_msg = (
+        "Here's the information I've captured:\n\n"
+        f"**{username or 'Your'} Profile**\n{profile_summary}\n\n"
+        "I can now recommend plants based on your preferences. What kind of plants are you interested in?"
+    )
+    return {
+        "messages": [AIMessage(content=completion_msg)],
+        "pending_questions": [],
+        "profile_answers": filled,  # Pass filled profile to recommender
+        "username": username,
     }
 
-    if next_question:
-        updates["messages"] = [AIMessage(content=next_question)]
-    elif not new_pending:
-        updates["messages"] = [AIMessage(content="Thanks! Let me find some plants for you.")]
 
-    return updates
+def profile_init(state: dict) -> dict:
+    """When profile not found: set handoff state so builder can greet."""
+    username = state.get("username") or _extract_username_from_messages(state.get("messages", [])) or ""
+    return {
+        "active_agent": "builder",
+        "handoff_reason": "profile_not_found",
+        "pending_questions": [FREEFORM_SENTINEL],
+        "profile_answers": _init_profile_null(),
+        "username": username,
+    }
+
+
+def profile_collector(state: dict) -> dict:
+    """Treat last user message: if freeform, extract fields; else answer current question."""
+    messages = state.get("messages", [])
+    pending = list(state.get("pending_questions") or [])
+    answers = dict(state.get("profile_answers") or {})
+    username = state.get("username") or ""
+    reason = state.get("handoff_reason")
+
+    # First time: show greeting asking for freeform text
+    if reason == "profile_not_found" and pending and pending[0] == FREEFORM_SENTINEL:
+        msg = (
+            f"Hi{f' {username}' if username else ''}! I couldn't find a saved profile for you.\n\n"
+            "Tell me your plant preferences in a short paragraph (experience, climate, light, watering, humidity, "
+            "temperature, size, how you want the plant to look—e.g. bright leaves, tall, trailing). I'll extract what I can and only ask follow-ups for anything missing."
+        )
+        return {
+            "messages": [AIMessage(content=msg)],
+            "handoff_reason": None,
+            "pending_questions": [FREEFORM_SENTINEL],  # Keep so next turn runs extraction
+        }
+
+    user_content = _get_last_user_content(messages)
+    if user_content is None:
+        return {"messages": [AIMessage(content="Please share your answer.")]}
+
+    if not pending:
+        return {"messages": [AIMessage(content="All done! What would you like to know?")]}
+
+    # Freeform extraction branch
+    if pending[0] == FREEFORM_SENTINEL:
+        extracted = _extract_fields_from_text(user_content)
+        print("\n[Extracted JSON]", json.dumps(extracted, indent=2))
+        # Handle username separately
+        if "username" in extracted and extracted["username"]:
+            username = str(extracted.pop("username", "")).strip()
+        for k, v in extracted.items():
+            if v is None or not str(v).strip():
+                continue
+            schema_key = EXTRACTED_KEY_TO_SCHEMA.get(k, k)
+            if schema_key == "physical_desc":
+                answers[schema_key] = str(v).strip()
+                continue
+            if schema_key not in QUESTION_TO_SCHEMA_KEY:
+                continue
+            # Pass through raw value; two-tower preprocess_user does normalization (normalize_light, watering_to_tags, vocab_lookup, etc.)
+            answers[schema_key] = str(v).strip()
+        pending.pop(0)
+        pending = _get_null_fields(answers)
+        if not pending:
+            return _complete_profile(answers, username)
+        first_key = pending[0]
+        first_q = PROFILE_QUESTIONS[QUESTION_TO_SCHEMA_KEY.index(first_key)]
+        return {
+            "messages": [AIMessage(content=first_q)],
+            "pending_questions": pending,
+            "profile_answers": answers,
+            "username": username,
+        }
+
+    # Direct answer to current question - pass through raw; two-tower preprocess_user handles normalization
+    current_schema_key = pending[0]
+    answers[current_schema_key] = user_content.strip()
+    pending.pop(0)
+
+    if not pending:
+        return _complete_profile(answers, username)
+
+    next_key = pending[0]
+    next_idx = QUESTION_TO_SCHEMA_KEY.index(next_key) if next_key in QUESTION_TO_SCHEMA_KEY else 0
+    next_q = PROFILE_QUESTIONS[next_idx] if next_idx < len(PROFILE_QUESTIONS) else next_key
+    return {
+        "messages": [AIMessage(content=next_q)],
+        "pending_questions": pending,
+        "profile_answers": answers,
+        "username": username,
+    }

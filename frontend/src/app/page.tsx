@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { PlantCardMenu } from "./components/PlantCardMenu";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -31,12 +30,14 @@ const normalizeName = (raw: unknown): string => {
 const normalizeExplanation = (raw: unknown, name: string): string => {
   const text = String(raw ?? "").trim();
   if (!text) return "";
+  // If the whole explanation is just the plant name, don't show it
+  if (text.toLowerCase() === name.toLowerCase()) return "";
   const lines = text
     .split(/\r?\n+/)
     .map((l) => l.trim())
     .filter(Boolean);
   const cleaned = lines.filter((line) => line.toLowerCase() !== name.toLowerCase()).join("\n\n").trim();
-  return cleaned === name ? "" : cleaned;
+  return cleaned;
 };
 
 const normalizeRecommendations = (raw: unknown): PlantRecommendation[] => {
@@ -186,14 +187,8 @@ export default function Home() {
                     {msg.recommendations.map((rec, j) => (
                       <div
                         key={j}
-                        className="relative flex gap-4 items-start rounded-xl overflow-hidden bg-white/50 dark:bg-zinc-700/50 p-3"
+                        className="flex gap-4 items-start rounded-xl overflow-hidden bg-white/50 dark:bg-zinc-700/50 p-3"
                       >
-                        {rec.plant_id && (
-                          <PlantCardMenu
-                            plantId={rec.plant_id}
-                            plantName={rec.name}
-                          />
-                        )}
                         <div className="shrink-0 w-24 h-24 rounded-lg overflow-hidden bg-zinc-200 dark:bg-zinc-600">
                           {rec.image_url ? (
                             <img
@@ -211,9 +206,11 @@ export default function Home() {
                           <p className="font-medium text-emerald-700 dark:text-emerald-400 mb-1">
                             {rec.name}
                           </p>
-                          <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
-                            {rec.explanation || "—"}
-                          </p>
+                          {rec.explanation ? (
+                            <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
+                              {rec.explanation}
+                            </p>
+                          ) : null}
                         </div>
                       </div>
                     ))}

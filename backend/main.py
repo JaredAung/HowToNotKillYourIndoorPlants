@@ -13,7 +13,9 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from agent.manager import app as graph_app, get_profile_questions, _get_last_ai_content
-from garden.garden import get_plant_by_id, get_user_garden_plants, remove_plant_from_garden
+from agent.recommender import _fetch_profile_from_db
+from garden.death import apply_prevention_actions, remove_plant_from_garden, submit_death_report
+from garden.garden import get_plant_by_id, get_user_garden_plants
 
 app = FastAPI(title="How To Not Kill Your Indoor Plants API")
 
@@ -64,7 +66,7 @@ def _build_state_from_session(session: dict, user_message: str) -> dict:
     messages = list(session.get("messages", []))
     messages.append(HumanMessage(content=user_message))
 
-    # First user message as username if not set
+    # First user message as username if not set (short message only)
     username = session.get("username")
     if not username and messages:
         first_content = getattr(messages[0], "content", None) or (messages[0].get("content") if isinstance(messages[0], dict) else "")
@@ -90,96 +92,68 @@ class ChatResponse(BaseModel):
     response: str
     recommendations: list[dict] = []
     greeting: str | None = None
+    profile: dict = {}
+    username: str | None = None
 
 
 def _to_chat_response(session_id: str, result: dict) -> ChatResponse:
     """Convert graph result to ChatResponse."""
     messages = result.get("messages", [])
-    last_ai = _get_last_ai_content(messages)
-    recs = result.get("recommendations", [])
-    greeting = result.get("greeting")
-
-    # Normalize recommendations
-    out_recs = []
-    for r in recs:
-        name = r.get("name") or r.get("latin", "Plant")
-        out_recs.append({
-            "name": name,
-            "image_url": r.get("image_url") or r.get("img_url", ""),
-            "explanation": r.get("explanation", ""),
-            "plant_id": r.get("plant_id", ""),
-        })
-
+    response = _get_last_ai_content(messages) or ""
+    profile = result.get("profile_answers", {}) or {}
+    username = result.get("username")
     return ChatResponse(
         session_id=session_id,
-        response=last_ai or "",
-        recommendations=out_recs,
-        greeting=greeting,
+        response=response,
+        recommendations=result.get("recommendations", []),
+        greeting=result.get("greeting"),
+        profile=profile,
+        username=username,
     )
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
-    """Sync chat endpoint. Processes message and returns full response."""
-    session_id, session = _get_or_create_session(request.session_id)
-    state = _build_state_from_session(session, request.message)
-
+def chat(req: ChatRequest):
+    """Sync chat endpoint."""
+    sid, session = _get_or_create_session(req.session_id)
+    state = _build_state_from_session(session, req.message)
     result = graph_app.invoke(state)
-
-    # Update session from result
     session["messages"] = result.get("messages", session["messages"])
     session["username"] = result.get("username", session["username"])
     session["profile_answers"] = result.get("profile_answers", session["profile_answers"])
-    session["pending_questions"] = result.get("pending_questions", session["pending_questions"])
-    session["last_recommendations"] = result.get("last_recommendations", session["last_recommendations"])
-
-    return _to_chat_response(session_id, result)
+    session["pending_questions"] = result.get("pending_questions", session.get("pending_questions", []))
+    session["last_recommendations"] = result.get("last_recommendations", [])
+    return _to_chat_response(sid, result)
 
 
 @app.post("/api/chat/stream")
-def chat_stream(request: ChatRequest):
-    """Streaming chat endpoint. Sends progress events via SSE, then final response."""
-    session_id, session = _get_or_create_session(request.session_id)
-    state = _build_state_from_session(session, request.message)
+def chat_stream(req: ChatRequest):
+    """Stream chat with progress events and final done payload."""
 
-    async def generate():
-        result = None
+    def generate():
+        sid, session = _get_or_create_session(req.session_id)
+        state = _build_state_from_session(session, req.message)
+
         try:
-            # Stream both updates (for progress) and values (for final state)
-            async for mode, chunk in graph_app.astream(
-                state, stream_mode=["updates", "values"]
-            ):
-                if mode == "updates":
-                    # chunk: {node_name: update} or (namespace, {node_name: update})
-                    if isinstance(chunk, tuple):
-                        _, node_updates = chunk
-                    else:
-                        node_updates = chunk
-                    for node_name, _ in (node_updates or {}).items():
-                        label = NODE_LABELS.get(
-                            node_name, node_name.replace("_", " ").title()
-                        )
-                        yield f"data: {json.dumps({'type': 'progress', 'label': label})}\n\n"
-                elif mode == "values":
-                    result = chunk
+            result = None
+            for chunk in graph_app.stream(state, stream_mode="values"):
+                result = chunk
+                yield f"data: {json.dumps({'type': 'progress', 'label': 'Working...'})}\n\n"
 
             if result is None:
                 result = graph_app.invoke(state)
 
-            # Update session from final result
             session["messages"] = result.get("messages", session["messages"])
             session["username"] = result.get("username", session["username"])
             session["profile_answers"] = result.get(
                 "profile_answers", session["profile_answers"]
             )
             session["pending_questions"] = result.get(
-                "pending_questions", session["pending_questions"]
+                "pending_questions", session.get("pending_questions", [])
             )
-            session["last_recommendations"] = result.get(
-                "last_recommendations", session["last_recommendations"]
-            )
+            session["last_recommendations"] = result.get("last_recommendations", [])
 
-            resp = _to_chat_response(session_id, result)
+            resp = _to_chat_response(sid, result)
             yield f"data: {json.dumps({'type': 'done', 'data': resp.model_dump()})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -187,23 +161,60 @@ def chat_stream(request: ChatRequest):
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
 
 
 @app.get("/api/plant/{plant_id}")
 def get_plant(plant_id: str):
-    """Fetch full plant details by ID. Returns 404 if not found."""
+    """Fetch plant details by ID."""
     plant = get_plant_by_id(plant_id)
-    if plant is None:
+    if not plant:
         from fastapi import HTTPException
-
         raise HTTPException(status_code=404, detail="Plant not found")
     return plant
+
+
+class DeathReportRequest(BaseModel):
+    username: str
+    plant_id: str
+    cause: list[str]
+    details: str = ""
+    reminder_system: bool = False
+    where_placed: str = ""
+    last_watered_date: str | None = None
+    travel_away: bool = False
+
+
+@app.post("/api/death-report")
+def death_report(req: DeathReportRequest):
+    """Submit death report via JSON body."""
+    return submit_death_report(
+        username=req.username,
+        plant_id=req.plant_id,
+        cause=req.cause,
+        details=req.details,
+        reminder_system=req.reminder_system,
+        where_placed=req.where_placed,
+        last_watered_date=req.last_watered_date,
+        travel_away=req.travel_away,
+    )
+
+
+class ApplyPreventionsRequest(BaseModel):
+    username: str
+    selected_preventions: list[str]
+    plant_id: str | None = None
+
+
+@app.post("/api/death-report/apply-preventions")
+def apply_preventions(req: ApplyPreventionsRequest):
+    """Apply selected prevention actions to the user's profile and remove the plant from garden."""
+    result = apply_prevention_actions(req.username, req.selected_preventions)
+    if req.plant_id and req.username:
+        removed = remove_plant_from_garden(req.username.strip(), req.plant_id.strip())
+        result["plant_removed"] = removed
+    return result
 
 
 @app.delete("/api/garden")
@@ -211,23 +222,30 @@ def delete_garden_plant(username: str = "", plant_id: str = ""):
     """Remove a plant from user's garden."""
     if not username or not plant_id:
         from fastapi import HTTPException
-
         raise HTTPException(status_code=400, detail="username and plant_id required")
     removed = remove_plant_from_garden(username.strip(), plant_id.strip())
     if not removed:
         from fastapi import HTTPException
-
         raise HTTPException(status_code=404, detail="Plant not found in garden")
     return {"ok": True}
 
 
 @app.get("/api/garden")
 def get_garden(username: str = ""):
-    """Fetch user's garden plants by username. Returns empty list if username missing or not found."""
+    """Fetch user's garden plants by username."""
     if not username or not username.strip():
         return {"plants": []}
     plants = get_user_garden_plants(username.strip())
     return {"plants": plants}
+
+
+@app.get("/api/profile")
+def get_profile(username: str = ""):
+    """Fetch user's profile by username."""
+    if not username or not username.strip():
+        return {"profile": {}}
+    profile = _fetch_profile_from_db(username.strip())
+    return {"profile": profile or {}}
 
 
 @app.get("/api/user-info/questions")

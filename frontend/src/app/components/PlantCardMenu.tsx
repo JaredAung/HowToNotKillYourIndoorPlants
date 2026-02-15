@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { DeathReportModal } from "./DeathReportModal";
 
 type PlantCardMenuProps = {
   plantId: string;
@@ -17,6 +18,7 @@ export function PlantCardMenu({
   onRemove,
 }: PlantCardMenuProps) {
   const [open, setOpen] = useState(false);
+  const [showDeathModal, setShowDeathModal] = useState(false);
 
   return (
     <div
@@ -49,29 +51,28 @@ export function PlantCardMenu({
           >
             Talk to plant
           </Link>
-          {username && onRemove ? (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                onRemove();
-                setOpen(false);
-              }}
-              className="block w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-zinc-100 dark:text-red-400 dark:hover:bg-zinc-700"
-            >
-              Death
-            </button>
-          ) : (
-            <Link
-              href="/garden"
-              className="block px-3 py-2 text-sm text-red-600 hover:bg-zinc-100 dark:text-red-400 dark:hover:bg-zinc-700"
-              onClick={(e) => e.stopPropagation()}
-            >
-              Death
-            </Link>
-          )}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setShowDeathModal(true);
+              setOpen(false);
+            }}
+            className="block w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-zinc-100 dark:text-red-400 dark:hover:bg-zinc-700"
+          >
+            💀 Death
+          </button>
         </div>
+      )}
+      {showDeathModal && (
+        <DeathReportModal
+          plantId={plantId}
+          plantName={plantName}
+          username={username}
+          onClose={() => setShowDeathModal(false)}
+          onComplete={onRemove}
+        />
       )}
     </div>
   );

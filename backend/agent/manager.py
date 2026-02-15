@@ -26,7 +26,6 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from agent.llm import get_ollama_llm
 from agent.profile_builder import (
-    FREEFORM_SENTINEL,
     get_profile_questions,
     profile_init,
     profile_collector,

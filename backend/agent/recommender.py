@@ -58,6 +58,26 @@ def _get_plants_collection():
     return MongoClient(uri)[database][PLANTS_COLLECTION]
 
 
+def _get_user_profiles_collection():
+    uri = os.getenv("MONGO_URI", "").strip().strip('"')
+    database = os.getenv("MONGO_DATABASE", "HowNotToKillYourPlants")
+    collection_name = os.getenv("MONGO_USER_PROFILES_COLLECTION", "UserProfiles")
+    if not uri:
+        return None
+    return MongoClient(uri)[database][collection_name]
+
+
+def _fetch_profile_from_db(username: str) -> Optional[Dict[str, Any]]:
+    """Fetch latest profile from MongoDB (includes hard_filter from death report)."""
+    coll = _get_user_profiles_collection()
+    if coll is None or not username:
+        return None
+    doc = coll.find_one({"username": {"$regex": f"^{re.escape(username)}$", "$options": "i"}})
+    if not doc:
+        return None
+    return doc.get("preferences", {}) or {}
+
+
 def _get_latin_name(p: dict) -> str:
     """Return Latin (scientific) name for display. Use only Latin, not common names."""
     return (p.get("latin") or "").strip() or "Unknown"
@@ -208,6 +228,79 @@ def _vector_search(coll, user_embedding: list[float], top_k: int = 5) -> list[di
     return list(coll.aggregate(pipeline))
 
 
+TOP_K_RETRIEVAL = 25
+
+# Priority boost weights for features before reranking (higher = stronger influence)
+PRIORITY_BOOST_WEIGHTS = {
+    "watering_preferences": 2.5,
+    "climate": 1,
+    "max_plant_size_preference": 1.0,
+}
+
+
+def _apply_priority_boost(
+    plants: List[Dict[str, Any]], profile_answers: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Re-sort ANN results by boosting plants that match priority profile features.
+    Applied before hard filter and reranker so key constraints (light, watering, etc.) rise to the top."""
+    if not plants or not profile_answers:
+        return plants
+    from resources.trained_two_tower.main_fixed import normalize_light, watering_to_tags
+
+    user_light = (profile_answers.get("light_availability") or "").strip()
+    user_light_norm = normalize_light(user_light) if user_light else None
+    user_watering = (profile_answers.get("watering_preferences") or "").strip().lower()
+    user_watering_tags = set(watering_to_tags(user_watering)) if user_watering else set()
+    user_climate = (profile_answers.get("climate") or "").strip().lower()
+    user_size = (profile_answers.get("max_plant_size_preference") or "").strip().lower()
+
+    def boost_score(plant: Dict[str, Any], rank: int) -> float:
+        score = 0.0
+        if user_light_norm:
+            ideal = normalize_light(plant.get("ideallight"))
+            tolerated = normalize_light(plant.get("toleratedlight"))
+            if user_light_norm in (ideal, tolerated):
+                score += PRIORITY_BOOST_WEIGHTS.get("light_availability", 2.0)
+        if user_watering_tags:
+            plant_watering = plant.get("watering") or ""
+            plant_tags = set(watering_to_tags(plant_watering))
+            if user_watering_tags & plant_tags:
+                score += PRIORITY_BOOST_WEIGHTS.get("watering_preferences", 1.5)
+        if user_climate:
+            plant_climate = (plant.get("climate") or "").strip().lower()
+            if plant_climate and (user_climate == plant_climate or user_climate in plant_climate):
+                score += PRIORITY_BOOST_WEIGHTS.get("climate", 1.2)
+        if user_size:
+            plant_size = (plant.get("size_bucket") or "").strip().lower()
+            size_ok = (
+                plant_size == user_size
+                or (user_size == "large" and plant_size in ("small", "medium", "large"))
+                or (user_size == "medium" and plant_size in ("small", "medium"))
+            )
+            if size_ok:
+                score += PRIORITY_BOOST_WEIGHTS.get("max_plant_size_preference", 1.0)
+        return (score, -rank)
+
+    scored = [(p, boost_score(p, i)) for i, p in enumerate(plants)]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [p for p, _ in scored]
+
+
+def _apply_hard_filter_light(plants: List[Dict[str, Any]], user_light: str) -> List[Dict[str, Any]]:
+    """Keep only plants whose ideal or tolerated light matches user_light."""
+    from resources.trained_two_tower.main_fixed import normalize_light
+    if not user_light or not plants:
+        return plants
+    user_norm = normalize_light(user_light)
+    filtered = []
+    for p in plants:
+        ideal = normalize_light(p.get("ideallight"))
+        tolerated = normalize_light(p.get("toleratedlight"))
+        if user_norm in (ideal, tolerated):
+            filtered.append(p)
+    return filtered
+
+
 def _two_tower_retrieve(
     profile_answers: Dict[str, Any], top_k: int = 5
 ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
@@ -225,10 +318,10 @@ def _two_tower_retrieve(
     except Exception as e:
         return f"Failed to encode user profile: {e}", None
 
-    # Fetch more candidates when reranker enabled for better reranking
-    fetch_k = 12 if (VOYAGE_RERANK_ENABLED and os.getenv("VOYAGE_API_KEY", "").strip()) else top_k
+    # Fetch more candidates for reranking and hard filters (always 40 for ANN)
+    fetch_k = max(top_k, TOP_K_RETRIEVAL)
     try:
-        top = _vector_search(coll, user_vec, top_k=fetch_k)
+        top = _vector_search(coll, user_vec, top_k=TOP_K_RETRIEVAL)
     except Exception as e:
         err = str(e).lower()
         if "index" in err or "vector" in err or "vectorsearch" in err:
@@ -238,8 +331,9 @@ def _two_tower_retrieve(
                 None,
             )
         raise
+    top = _apply_priority_boost(top, profile_answers)
     names = [_get_latin_name(p) for p in top]
-    print(f"Two-tower recommended plants (top_k={top_k}, count={len(top)}): {names}")
+    print(f"Two-tower recommended plants (top_k={TOP_K_RETRIEVAL}, count={len(top)}): {names}")
     plants_str = "\n\n".join(_format_plant(p) for p in top) if top else "No matching plants found."
     return plants_str, top if top else None
 
@@ -292,31 +386,62 @@ def _extract_greeting(content: str) -> str:
     return ""
 
 
-def _parse_llm_recommendations(content: str, num_plants: int) -> List[str]:
-    """Extract per-plant explanation blocks from LLM output. Handles:
-    - 1. **Plant**: explanation on same line
-    - 1. **Plant**\nexplanation on next line(s)
-    """
+def _parse_llm_recommendations(content: str, num_plants: int, plant_names: Optional[List[str]] = None) -> List[str]:
+    """Extract per-plant explanation blocks from LLM output. Handles numbered (1. **Name**) and unnumbered (**Name**) formats."""
+    text = content
+    if text.startswith("[DEBUG]"):
+        idx = text.find("\n\n")
+        text = text[idx + 2 :] if idx >= 0 else text
     explanations: List[str] = []
-    # Match N. **PlantName** or N. PlantName, then capture explanation (same line after : or on following lines) until next plant
-    pattern = r"\d+\.\s+(?:\*\*)?[^*\n]+(?:\*\*)?\s*(?::\s*)?([\s\S]*?)(?=\d+\.\s+(?:\*\*)?|\Z)"
-    matches = re.findall(pattern, content)
-    for m in matches[:num_plants]:
-        expl = _strip_signoff(m.strip())
-        explanations.append(expl if expl else "")
+    fallback = "Fits your profile. Add to your garden to get personalized care tips."
+
+    # Try split by numbered items first: "1. **" or "2. "
+    parts = re.split(r"(?=\d+\.\s+(?:\*\*)?)", text)
+    if len(parts) >= num_plants + 1:
+        for part in parts[1 : num_plants + 1]:
+            part = part.strip()
+            if not part:
+                explanations.append(fallback)
+                continue
+            expl = re.sub(r"^\d+\.\s+(?:\*\*)?[^*\n]+(?:\*\*)?\s*:?\s*", "", part, count=1).strip()
+            expl = _strip_signoff(expl)
+            if not expl or len(expl) < 10 or expl.lower() in {n.lower() for n in (plant_names or [])}:
+                expl = fallback
+            explanations.append(expl)
+    else:
+        # Fallback: split by **PlantName** pattern (unnumbered format)
+        if plant_names:
+            for name in plant_names[:num_plants]:
+                escaped = re.escape(name)
+                match = re.search(rf"\*\*{escaped}\*\*\s*:?\s*([\s\S]*?)(?=\*\*[^*]+\*\*|\Z)", text, re.I)
+                if match:
+                    expl = _strip_signoff(match.group(1).strip())
+                    if expl and len(expl) >= 10:
+                        explanations.append(expl)
+                        continue
+                explanations.append(fallback)
+        while len(explanations) < num_plants:
+            explanations.append(fallback)
+
     while len(explanations) < num_plants:
-        explanations.append("")
+        explanations.append(fallback)
     return explanations[:num_plants]
 
 
 def recommender_node(state: dict) -> dict:
     """Generate plant recommendations using trained two-tower model (UserTower vs itemTowerEmbeddings)."""
     print("[Recommender] recommender_node ENTERED", flush=True)
-    profile_answers = state.get("profile_answers") or {}
+    profile_answers = dict(state.get("profile_answers") or {})
     username = state.get("username") or ""
 
+    # Reload from MongoDB to get latest (including hard_filter from death report)
+    if username:
+        db_prefs = _fetch_profile_from_db(username)
+        if db_prefs:
+            profile_answers.update(db_prefs)
+
     try:
-        plants_str, plants = _two_tower_retrieve(profile_answers, top_k=3)
+        plants_str, plants = _two_tower_retrieve(profile_answers, top_k=TOP_K_RETRIEVAL)
     except Exception as e:
         return {"messages": [AIMessage(content=f"I had trouble fetching recommendations. ({e})")]}
 
@@ -325,7 +450,17 @@ def recommender_node(state: dict) -> dict:
     if not plants:
         return {"messages": [AIMessage(content=plants_str or "No plants retrieved from the database.")]}
 
-    user_features = ", ".join(f"{k}: {v}" for k, v in profile_answers.items() if v)
+    # Apply hard filter from profile (stored in MongoDB after death report selection)
+    hard_filter = profile_answers.get("hard_filter") or []
+    if isinstance(hard_filter, str):
+        hard_filter = [hard_filter] if hard_filter else []
+    if "light" in hard_filter:
+        user_light = profile_answers.get("light_availability") or ""
+        plants = _apply_hard_filter_light(plants, user_light)
+        if not plants:
+            return {"messages": [AIMessage(content="No plants match your light level. Try adjusting your light preference or removing the 'match light' filter.")]}
+
+    user_features = ", ".join(f"{k}: {v}" for k, v in profile_answers.items() if v and k != "hard_filter")
     messages = state.get("messages", [])
     last_user = ""
     for m in reversed(messages):
@@ -339,11 +474,11 @@ def recommender_node(state: dict) -> dict:
 
     # Voyage AI reranker: refine order by relevance to query (profile + intent)
     rerank_query = f"{prompt_text}. User profile: {user_features}"
-    plants = _rerank_plants(plants, rerank_query, top_k=3)
+    plants = _rerank_plants(plants, rerank_query, top_k=5)
     plants_str = "\n\n".join(_format_plant(p) for p in plants) if plants else "No matching plants found."
 
     greeting_instruction = (
-        f"Start with a brief personalized greeting (e.g. 'Hi {username}! Based on your preferences, here are 3 plants I think you'd like:') "
+        f"Start with a brief personalized greeting (e.g. 'Hi {username}! Based on your preferences, here are 5 plants I think you'd like:') "
         if username else "Start with a brief greeting before the plant list. "
     )
     system = (
@@ -351,10 +486,10 @@ def recommender_node(state: dict) -> dict:
         "Here are plants retrieved by the trained two-tower model (UserTower vs itemTowerEmbeddings):\n\n"
         f"{plants_str}\n\n"
         f"{greeting_instruction}"
-        "Then present 3 of the retrieved plants with why each fits their profile and one care tip. "
-        "Use numbered format: 1. **Plant name**: explanation... * Care tip: ... "
-        "Use only the Latin (scientific) names from the plant data above, not common names. "
-        "Do NOT add sign-off phrases like 'Let me know if you have any questions' at the end."
+        "Then present 5 of the retrieved plants. For EACH plant, write 1-2 sentences explaining WHY it fits their profile, then one care tip. "
+        "Format: 1. **Plant name**: [Your explanation - do NOT repeat the plant name. Explain why it fits their light, watering, etc.] * Care tip: [one tip] "
+        "Use only the Latin (scientific) names from the plant data above. "
+        "Do NOT add sign-off phrases at the end."
     )
     llm = get_ollama_llm(temperature=0.5)
     try:
@@ -366,10 +501,15 @@ def recommender_node(state: dict) -> dict:
     except Exception as e:
         content = f"I had trouble formatting recommendations. ({e})"
 
+    # Debug: log LLM output for explanation parsing
+    print(f"[Recommender] LLM content (first 600 chars): {repr(content[:600])}", flush=True)
+    plant_names = [_get_latin_name(p) for p in plants]
+    explanations = _parse_llm_recommendations(content, len(plants), plant_names)
+    print(f"[Recommender] Parsed explanations: {explanations}", flush=True)
+
     recommendations: List[Dict[str, Any]] = []
     last_recommendations: List[Dict[str, Any]] = []
     if plants:
-        explanations = _parse_llm_recommendations(content, len(plants))
         for i, (p, expl) in enumerate(zip(plants, explanations)):
             latin = _get_latin_name(p)
             common_list = p.get("common") or []
@@ -388,9 +528,9 @@ def recommender_node(state: dict) -> dict:
     greeting = _extract_greeting(content)
     # If LLM skipped the greeting, prepend a fallback
     if not greeting and username:
-        greeting = f"Hi {username}! Based on your preferences, here are 3 plants I think you'd like:"
+        greeting = f"Hi {username}! Based on your preferences, here are 5 plants I think you'd like:"
     elif not greeting:
-        greeting = "Based on your preferences, here are 3 plants I think you'd like:"
+        greeting = "Based on your preferences, here are 5 plants I think you'd like:"
 
     extracted = {
         "node": "recommender",
