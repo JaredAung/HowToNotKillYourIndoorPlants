@@ -1,0 +1,12 @@
+{
+  "light_vocab": ["direct_sun", "bright_indirect", "medium"],
+  "climate_vocab": ["Arid Tropical", "Tropical", "Tropical humid", "Subtropical", "Tropical to subtropical", "Subtropical arid"],
+  "care_level_vocab": ["medium", "hard", "easy"],
+  "category_vocab": ["Cactus And Succulent", "Foliage plant", "Anthurium", "Bromeliad", "Flower", "Other", "Spathiphyllum", "Schefflera", "Fern", "Palm", "Ficus", "Hanging", "Dieffenbachia", "Aralia", "Dracaena", "Sansevieria", "Aglaonema", "Philodendron", "Grass"],
+  "family_vocab": ["Amaryllidaceae", "Euphorbiaceae", "Araceae", "Cactaceae", "Bromeliaceae", "Orchidaceae", "Piperaceae", "Liliaceae", "Araliaceae", "Polypodiaceae", "Arecaceae", "Aspleniaceae", "Moraceae", "Apocynaceae", "Pteridaceae", "Marantaceae", "Nephrolepidaceae", "Dryopteridaceae", "Agavaceae", "Miliaceae", "Crasssulaceae", "Asclepiadaceae", "Vitaceae", "Cycadaceae", "Palmae", "Sinopteridaceae", "Bignoniaceae", "Nyctaginaceae", "Davalliaceae", "Podocarpaceae", "Zingiberaceae", "Malvaceae", "Gesneriaceae", "Strelitziaceae", "Melastomataceae"],
+  "origin_vocab": ["Mexico", "Cultivar", "Guyana", "Brazil", "Hybrid", "Asia", "Mediterranean", "Malaysia", "Taiwan", "Central Africa", "India", "South Africa", "Honduras", "South America", "Madagascar", "Japan", "Ouest Africa", "Dominica", "Zimbabwe", "Australia", "Costa rica", "Canaries", "Rodrigue Island", "Ecuador", "Colombia", "Central America", "Venezuela", "China", "Philippines", "New Calidonia", "Australia & New Guinea", "Korea", "Central Mexico", "Indonisia", "Africa", "South Pacific", "Java", "Guinea", "Vietnam"],
+  "size_bucket_vocab": ["medium", "small", "large"],
+  "use_vocab": ["Potted plant", "Primary", "Secondary", "Table top", "Tertiary", "Ground cover", "Colors / Forms", "Flower", "Hanging"],
+  "water_vocab": ["watering_pattern:dry_between", "watering_level:low", "drought_tolerant:true", "watering_pattern:keep_moist", "watering_level:high", "drought_tolerant:false", "watering_level:medium"],
+  "humidity_vocab": ["humidity_level:medium", "humidity_level:high"]
+}
