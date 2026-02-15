@@ -13,6 +13,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from agent.manager import app as graph_app, get_profile_questions, _get_last_ai_content
+from garden.garden import get_plant_by_id, get_user_garden_plants
 
 app = FastAPI(title="How To Not Kill Your Indoor Plants API")
 
@@ -191,6 +192,26 @@ def chat_stream(request: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/api/plant/{plant_id}")
+def get_plant(plant_id: str):
+    """Fetch full plant details by ID. Returns 404 if not found."""
+    plant = get_plant_by_id(plant_id)
+    if plant is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="Plant not found")
+    return plant
+
+
+@app.get("/api/garden")
+def get_garden(username: str = ""):
+    """Fetch user's garden plants by username. Returns empty list if username missing or not found."""
+    if not username or not username.strip():
+        return {"plants": []}
+    plants = get_user_garden_plants(username.strip())
+    return {"plants": plants}
 
 
 @app.get("/api/user-info/questions")

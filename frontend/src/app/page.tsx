@@ -147,15 +147,6 @@ export default function Home() {
 
   return (
     <div className="flex min-h-screen flex-col bg-white dark:bg-zinc-900">
-      {/* Header */}
-      <header className="shrink-0 border-b border-zinc-200 px-4 py-4 dark:border-zinc-800">
-        <h1 className="text-center text-3xl font-bold tracking-tight [font-family:var(--font-playfair)] sm:text-4xl">
-          <span className="bg-gradient-to-r from-emerald-600 via-emerald-700 to-teal-700 bg-clip-text text-transparent dark:from-emerald-400 dark:via-emerald-500 dark:to-teal-500">
-            How To Not Kill Your Indoor Plants
-          </span>
-        </h1>
-      </header>
-
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl px-4 py-6">
