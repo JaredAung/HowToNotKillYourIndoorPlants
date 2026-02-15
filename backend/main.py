@@ -520,7 +520,6 @@ def garden_plant_chat(request: PlantChatRequest):
             tone_tag="quiet",
             recommended_actions=[],
         )
-
     persona = build_plant_persona(request.plant or {})
     history = [{"role": m.role, "content": m.content} for m in (request.history or [])]
     result = generate_plant_reply(

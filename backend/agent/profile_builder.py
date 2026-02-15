@@ -10,7 +10,7 @@ from typing import Any, Optional
 from langchain_core.messages import AIMessage, HumanMessage
 from pymongo import MongoClient
 
-from agent.llm import get_ollama_llm
+from agent.llm import get_llm
 
 # Valid use values from house_plants_enriched_schema.json (placement/style)
 USE_VALUES = [
@@ -166,7 +166,7 @@ def _extract_fields_from_text(text: str) -> dict[str, Any]:
     text = (text or "").strip()
     if not text:
         return {}
-    llm = get_ollama_llm(temperature=0.2)
+    llm = get_llm(temperature=0.2)
     keys = [k for k in USER_PROFILE_SCHEMA.keys() if k not in ("physical_desc", "username")]
     keys.append("username")  # Extract name if mentioned
     prompt = f"""Extract plant-care profile fields from this text. Return a JSON object with these keys (use null if not mentioned).

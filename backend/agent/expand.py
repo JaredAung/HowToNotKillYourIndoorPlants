@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
-from agent.llm import get_ollama_llm
+from agent.llm import get_llm
 from agent.recommender import _find_plant_by_name, _format_plant, _get_latin_name, _get_plants_collection
 
 
@@ -60,7 +60,7 @@ Plant data (use this to write your explanation):
 
 Write a clear explanation that addresses the user's question and relates to their profile when relevant. Use markdown for readability. Be concise but informative."""
 
-    llm = get_ollama_llm(temperature=0.3)
+    llm = get_llm(temperature=0.3)
     try:
         resp = llm.invoke([
             SystemMessage(content=system),

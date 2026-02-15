@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from pymongo import MongoClient
 
-from agent.llm import get_ollama_llm
+from agent.llm import get_llm
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -155,7 +155,7 @@ Plant data (use this to write your comparison):
 
 Write a clear comparison that addresses the user's question and relates to their profile when relevant. Use markdown for readability. Be concise but informative."""
 
-    llm = get_ollama_llm(temperature=0.3)
+    llm = get_llm(temperature=0.3)
     try:
         resp = llm.invoke([
             SystemMessage(content=system),
@@ -491,7 +491,7 @@ def recommender_node(state: dict) -> dict:
         "Use only the Latin (scientific) names from the plant data above. "
         "Do NOT add sign-off phrases at the end."
     )
-    llm = get_ollama_llm(temperature=0.5)
+    llm = get_llm(temperature=0.5)
     try:
         resp = llm.invoke([
             SystemMessage(content=system),

@@ -24,7 +24,7 @@ from pymongo import MongoClient
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from agent.llm import get_ollama_llm
+from agent.llm import get_llm
 from agent.profile_builder import (
     get_profile_questions,
     profile_init,
@@ -367,7 +367,7 @@ def resolve_selection_node(state: GraphState) -> dict:
 
     if selected is None:
         # LLM fallback for descriptive refs ("the low light one", "that vine one")
-        llm = get_ollama_llm(temperature=0)
+        llm = get_llm(temperature=0)
         numbered = "\n".join(f"{i}. {n}" for i, n in enumerate(names, 1))
         prompt = f"""The user was shown these plants:
 {numbered}
