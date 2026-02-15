@@ -45,7 +45,7 @@ export function PlantCardMenu({
       {open && (
         <div className="absolute right-0 top-full mt-1 min-w-[140px] rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
           <Link
-            href={`/?plant=${encodeURIComponent(plantId)}`}
+            href={`/garden/chat?plant_id=${encodeURIComponent(plantId)}${username ? `&username=${encodeURIComponent(username)}` : ""}`}
             className="block px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-700"
             onClick={(e) => e.stopPropagation()}
           >

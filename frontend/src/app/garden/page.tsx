@@ -88,6 +88,8 @@ export default function GardenPage() {
     e.preventDefault();
     fetchGarden(inputUsername);
   };
+  const showMissingProfileMessage =
+    !loading && plants.length === 0 && Object.keys(profile).length === 0;
 
   if (!username) {
     return (
@@ -156,34 +158,16 @@ export default function GardenPage() {
             <p className="mb-4 text-sm text-red-600 dark:text-red-400">{error}</p>
           )}
 
-          <div className="mb-6 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 dark:border-zinc-700 dark:bg-zinc-800/50">
-            <p className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
-              {username}&apos;s profile
-            </p>
-            {Object.keys(profile).length > 0 ? (
-              <div className="grid gap-x-6 gap-y-2 text-sm text-zinc-700 dark:text-zinc-300 sm:grid-cols-2 lg:grid-cols-3">
-                {[...PROFILE_ORDER, ...Object.keys(profile).filter((k) => !PROFILE_ORDER.includes(k) && k !== "hard_filter")]
-                  .filter((key) => key in profile)
-                  .map((key) => {
-                    const val = profile[key];
-                    const label = PROFILE_LABELS[key] ?? key.replace(/_/g, " ");
-                    const display = formatProfileValue(val);
-                    return (
-                      <div key={key} className="flex gap-2">
-                        <span className="shrink-0 text-zinc-500 dark:text-zinc-400">
-                          {label}:
-                        </span>
-                        <span>{display}</span>
-                      </div>
-                    );
-                  })}
-              </div>
-            ) : (
+          {showMissingProfileMessage && (
+            <div className="mb-6 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 dark:border-zinc-700 dark:bg-zinc-800/50">
+              <p className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                {username}&apos;s profile
+              </p>
               <p className="text-sm text-zinc-500 dark:text-zinc-400">
                 No profile found. Complete the Recommender flow to build your profile.
               </p>
-            )}
-          </div>
+            </div>
+          )}
 
           {plants.length === 0 && !loading ? (
             <p className="text-zinc-600 dark:text-zinc-400">
