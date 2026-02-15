@@ -16,6 +16,41 @@ const INITIAL_MESSAGE: Message = {
   text: "Hi! What's your name?",
 };
 
+const normalizeName = (raw: unknown): string => {
+  const text = String(raw ?? "").trim();
+  if (!text) return "Plant recommendation";
+  const lines = text
+    .split(/\r?\n+/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length <= 1) return text;
+  return lines[0];
+};
+
+const normalizeExplanation = (raw: unknown, name: string): string => {
+  const text = String(raw ?? "").trim();
+  if (!text) return "";
+  const lines = text
+    .split(/\r?\n+/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const cleaned = lines.filter((line) => line.toLowerCase() !== name.toLowerCase()).join("\n\n").trim();
+  return cleaned === name ? "" : cleaned;
+};
+
+const normalizeRecommendations = (raw: unknown): PlantRecommendation[] => {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => {
+    const rec = (item ?? {}) as Partial<PlantRecommendation>;
+    const name = normalizeName(rec.name);
+    return {
+      name,
+      image_url: typeof rec.image_url === "string" ? rec.image_url : "",
+      explanation: normalizeExplanation(rec.explanation, name),
+    };
+  });
+};
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([INITIAL_MESSAGE]);
   const [input, setInput] = useState("");
@@ -45,12 +80,14 @@ export default function Home() {
 
       const data = await res.json();
       setSessionId(data.session_id);
-      const recs = Array.isArray(data.recommendations) ? data.recommendations : [];
+      const recs = normalizeRecommendations(data.recommendations);
+      const greeting = typeof data.greeting === "string" ? data.greeting.trim() : "";
+      const responseText = typeof data.response === "string" ? data.response : "";
       setMessages((m) => [
         ...m,
         {
           role: "assistant",
-          text: data.response,
+          text: greeting || responseText,
           recommendations: recs.length > 0 ? recs : undefined,
         },
       ]);
@@ -107,6 +144,9 @@ export default function Home() {
               >
                 {msg.role === "assistant" && msg.recommendations?.length ? (
                   <div className="space-y-4">
+                    {msg.text && (
+                      <p className="whitespace-pre-wrap text-[15px] leading-relaxed">{msg.text}</p>
+                    )}
                     {msg.recommendations.map((rec, j) => (
                       <div
                         key={j}

@@ -81,6 +81,24 @@ def _get_last_user_message(state: GraphState) -> str:
     return ""
 
 
+def _infer_username_from_state(state: GraphState) -> str:
+    """Infer username when not explicitly set in state (useful for CLI runs)."""
+    username = (state.get("username") or "").strip()
+    if username:
+        return username
+
+    # If profile is not filled yet, treat short first-turn user text as username.
+    profile_answers = state.get("profile_answers") or {}
+    has_profile = any(v for v in profile_answers.values() if v and str(v).strip())
+    if has_profile:
+        return ""
+
+    user_msg = (_get_last_user_message(state) or "").strip()
+    if user_msg and len(user_msg) <= 50 and "\n" not in user_msg:
+        return user_msg
+    return ""
+
+
 def _has_selection_reference(text: str) -> bool:
     """Detect if user references selection (first 2, top 2, #2, second one, the vine one, etc.)."""
     t = (text or "").lower()
@@ -163,11 +181,14 @@ def inject_context(state: GraphState) -> dict:
 
 def check_profile_node(state: GraphState) -> dict:
     """Directly call check_user_profile_exists and inject ToolMessage. Bypasses LLM for reliability."""
-    username = state.get("username") or ""
+    username = _infer_username_from_state(state)
     if not username:
         return {}
     result = check_user_profile_exists.invoke({"username": username})
-    return {"messages": [ToolMessage(content=str(result), tool_call_id="check_profile_direct")]}
+    return {
+        "messages": [ToolMessage(content=str(result), tool_call_id="check_profile_direct")],
+        "username": username,
+    }
 
 
 def _is_tool_message(m) -> bool:
