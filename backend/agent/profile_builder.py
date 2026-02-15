@@ -218,18 +218,18 @@ def _get_null_fields(answers: dict) -> list[str]:
 
 
 def _complete_profile(answers: dict, username: str) -> dict:
-    """Save profile to Mongo, reiterate captured info, return completion state."""
+    """Save profile to Mongo, reiterate captured info, return completion state. Keeps profile_answers so reasoning agent can use them."""
     filled = {k: v for k, v in answers.items() if v is not None and str(v).strip()}
     profile_summary = "\n".join(f"  • {k}: {v}" for k, v in filled.items())
     completion_msg = (
         "Here's the information I've captured:\n\n"
         f"**{username}'s Profile**\n{profile_summary}\n\n"
-        "(Not saved to database yet.) I can now recommend plants based on your preferences. What kind of plants are you interested in?"
+        "(Not saved to database yet.) Let me recommend some plants for you..."
     )
     return {
         "messages": [AIMessage(content=completion_msg)],
         "pending_questions": [],
-        "profile_answers": {},
+        "profile_answers": filled,  # Keep for reasoning agent to use on next turn
         "username": username,
     }
 

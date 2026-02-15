@@ -68,9 +68,16 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
 
 
+class PlantRecommendation(BaseModel):
+    name: str
+    image_url: str
+    explanation: str
+
+
 class ChatResponse(BaseModel):
     response: str
     session_id: str
+    recommendations: list[dict] = []  # Always return array; [{name, image_url, explanation}] when from recommender
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -83,8 +90,19 @@ def chat(request: ChatRequest):
     state = _chat_sessions.get(session_id, {"messages": []})
 
     state["messages"] = state.get("messages", []) + [{"role": "user", "content": request.message.strip()}]
+    state["recommendations"] = []  # Clear; recommender will set if applicable
     result = graph_app.invoke(state)
     _chat_sessions[session_id] = result
 
+    print("[Chat API] Graph result keys:", list(result.keys()))
+    print("[Chat API] result['recommendations']:", result.get("recommendations"))
+
     last_ai = _get_last_ai_content(result.get("messages", []))
-    return ChatResponse(response=last_ai or "(no response)", session_id=session_id)
+    recommendations = result.get("recommendations") or []
+    payload = {
+        "response": last_ai or "(no response)",
+        "session_id": session_id,
+        "recommendations": recommendations,
+    }
+    print("[Chat API] Sending to frontend:", payload)
+    return ChatResponse(**payload)
