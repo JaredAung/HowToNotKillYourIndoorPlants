@@ -4,10 +4,20 @@ import { useState, useRef, useEffect } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-type Message = { role: "user" | "assistant"; text: string };
+type PlantRecommendation = { name: string; image_url: string; explanation: string };
+type Message = {
+  role: "user" | "assistant";
+  text: string;
+  recommendations?: PlantRecommendation[];
+};
+
+const INITIAL_MESSAGE: Message = {
+  role: "assistant",
+  text: "Hi! What's your name?",
+};
 
 export default function Home() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>([INITIAL_MESSAGE]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -35,7 +45,15 @@ export default function Home() {
 
       const data = await res.json();
       setSessionId(data.session_id);
-      setMessages((m) => [...m, { role: "assistant", text: data.response }]);
+      const recs = Array.isArray(data.recommendations) ? data.recommendations : [];
+      setMessages((m) => [
+        ...m,
+        {
+          role: "assistant",
+          text: data.response,
+          recommendations: recs.length > 0 ? recs : undefined,
+        },
+      ]);
     } catch {
       setMessages((m) => [
         ...m,
@@ -60,32 +78,6 @@ export default function Home() {
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-3xl px-4 py-6">
-          {messages.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-16 text-center">
-              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-emerald-100 dark:bg-emerald-900/30">
-                <svg
-                  className="h-6 w-6 text-emerald-600 dark:text-emerald-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"
-                  />
-                </svg>
-              </div>
-              <p className="mb-1 text-lg font-medium text-zinc-700 dark:text-zinc-300">
-                How can I help you today?
-              </p>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                Start by typing your name, then share your plant preferences.
-              </p>
-            </div>
-          )}
-
           {messages.map((msg, i) => (
             <div
               key={i}
@@ -113,7 +105,40 @@ export default function Home() {
                     : "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200"
                 }`}
               >
-                <p className="whitespace-pre-wrap text-[15px] leading-relaxed">{msg.text}</p>
+                {msg.role === "assistant" && msg.recommendations?.length ? (
+                  <div className="space-y-4">
+                    {msg.recommendations.map((rec, j) => (
+                      <div
+                        key={j}
+                        className="flex gap-4 items-start rounded-xl overflow-hidden bg-white/50 dark:bg-zinc-700/50 p-3"
+                      >
+                        <div className="shrink-0 w-24 h-24 rounded-lg overflow-hidden bg-zinc-200 dark:bg-zinc-600">
+                          {rec.image_url ? (
+                            <img
+                              src={rec.image_url}
+                              alt={rec.name}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-zinc-400 text-xs">
+                              No image
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium text-emerald-700 dark:text-emerald-400 mb-1">
+                            {rec.name}
+                          </p>
+                          <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
+                            {rec.explanation || "—"}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="whitespace-pre-wrap text-[15px] leading-relaxed">{msg.text}</p>
+                )}
               </div>
               {msg.role === "user" && (
                 <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-300 dark:bg-zinc-600">
@@ -156,7 +181,7 @@ export default function Home() {
         <div className="mx-auto max-w-3xl">
           <div className="flex items-end gap-2 rounded-2xl border border-zinc-200 bg-white px-4 py-3 shadow-sm dark:border-zinc-700 dark:bg-zinc-800">
             <textarea
-              placeholder="Message How To Not Kill Your Indoor Plants..."
+              placeholder={messages.length === 1 ? "Enter your name..." : "Message How To Not Kill Your Indoor Plants..."}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
