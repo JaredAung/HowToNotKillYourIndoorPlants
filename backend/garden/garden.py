@@ -125,3 +125,23 @@ def get_plant_by_id(plant_id: str) -> Dict[str, Any] | None:
         }
     except Exception:
         return None
+
+
+def remove_plant_from_garden(username: str, plant_id: str) -> bool:
+    """
+    Remove a plant from user's garden. Returns True if removed, False otherwise.
+    Uses case-insensitive username match.
+    """
+    garden_coll = _get_user_garden_collection()
+    if garden_coll is None or not username or not plant_id:
+        return False
+    try:
+        result = garden_coll.delete_one(
+            {
+                "username": {"$regex": f"^{re.escape(username)}$", "$options": "i"},
+                "plant_id": plant_id,
+            }
+        )
+        return result.deleted_count > 0
+    except Exception:
+        return False

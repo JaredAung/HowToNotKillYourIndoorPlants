@@ -376,8 +376,10 @@ def recommender_node(state: dict) -> dict:
             if isinstance(common_list, str):
                 common_list = [common_list] if common_list else []
             img = p.get("image_url") or p.get("img_url") or ""
-            recommendations.append({"name": latin, "image_url": img, "explanation": expl})
             plant_id = str(p.get("_id", "")) if p.get("_id") else ""
+            recommendations.append({
+                "name": latin, "image_url": img, "explanation": expl, "plant_id": plant_id,
+            })
             last_recommendations.append({
                 "rank": i + 1, "name": latin, "plant_id": plant_id, "latin": latin,
                 "common": common_list,  # for matching user input like "croton"

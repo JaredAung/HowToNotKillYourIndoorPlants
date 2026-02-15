@@ -13,7 +13,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from agent.manager import app as graph_app, get_profile_questions, _get_last_ai_content
-from garden.garden import get_plant_by_id, get_user_garden_plants
+from garden.garden import get_plant_by_id, get_user_garden_plants, remove_plant_from_garden
 
 app = FastAPI(title="How To Not Kill Your Indoor Plants API")
 
@@ -107,6 +107,7 @@ def _to_chat_response(session_id: str, result: dict) -> ChatResponse:
             "name": name,
             "image_url": r.get("image_url") or r.get("img_url", ""),
             "explanation": r.get("explanation", ""),
+            "plant_id": r.get("plant_id", ""),
         })
 
     return ChatResponse(
@@ -203,6 +204,21 @@ def get_plant(plant_id: str):
 
         raise HTTPException(status_code=404, detail="Plant not found")
     return plant
+
+
+@app.delete("/api/garden")
+def delete_garden_plant(username: str = "", plant_id: str = ""):
+    """Remove a plant from user's garden."""
+    if not username or not plant_id:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail="username and plant_id required")
+    removed = remove_plant_from_garden(username.strip(), plant_id.strip())
+    if not removed:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="Plant not found in garden")
+    return {"ok": True}
 
 
 @app.get("/api/garden")

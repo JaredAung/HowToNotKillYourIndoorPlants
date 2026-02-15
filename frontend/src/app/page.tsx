@@ -1,10 +1,11 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { PlantCardMenu } from "./components/PlantCardMenu";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-type PlantRecommendation = { name: string; image_url: string; explanation: string };
+type PlantRecommendation = { name: string; image_url: string; explanation: string; plant_id?: string };
 type Message = {
   role: "user" | "assistant";
   text: string;
@@ -185,8 +186,14 @@ export default function Home() {
                     {msg.recommendations.map((rec, j) => (
                       <div
                         key={j}
-                        className="flex gap-4 items-start rounded-xl overflow-hidden bg-white/50 dark:bg-zinc-700/50 p-3"
+                        className="relative flex gap-4 items-start rounded-xl overflow-hidden bg-white/50 dark:bg-zinc-700/50 p-3"
                       >
+                        {rec.plant_id && (
+                          <PlantCardMenu
+                            plantId={rec.plant_id}
+                            plantName={rec.name}
+                          />
+                        )}
                         <div className="shrink-0 w-24 h-24 rounded-lg overflow-hidden bg-zinc-200 dark:bg-zinc-600">
                           {rec.image_url ? (
                             <img

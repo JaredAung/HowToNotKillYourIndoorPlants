@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { PlantCardMenu } from "../components/PlantCardMenu";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -120,6 +121,20 @@ export default function GardenPage() {
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {plants.map((plant, i) => {
+                const handleRemove = async () => {
+                  if (!plant.plant_id) return;
+                  try {
+                    const res = await fetch(
+                      `${API_URL}/api/garden?username=${encodeURIComponent(username)}&plant_id=${encodeURIComponent(plant.plant_id)}`,
+                      { method: "DELETE" }
+                    );
+                    if (res.ok) {
+                      setPlants((p) => p.filter((x) => x.plant_id !== plant.plant_id));
+                    }
+                  } catch {
+                    setError("Failed to remove plant");
+                  }
+                };
                 const CardContent = (
                   <>
                     <div className="aspect-square w-full overflow-hidden bg-zinc-200 dark:bg-zinc-600">
@@ -141,14 +156,24 @@ export default function GardenPage() {
                   </>
                 );
                 const cardClass =
-                  "block overflow-hidden rounded-xl border border-zinc-200 bg-zinc-50 transition-shadow hover:shadow-md dark:border-zinc-700 dark:bg-zinc-800/50";
-                return plant.plant_id ? (
-                  <Link key={plant.plant_id || i} href={`/plant/${plant.plant_id}`} className={cardClass}>
-                    {CardContent}
-                  </Link>
-                ) : (
-                  <div key={i} className={cardClass}>
-                    {CardContent}
+                  "block overflow-hidden rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800/50";
+                return (
+                  <div key={plant.plant_id || i} className="relative">
+                    {plant.plant_id && (
+                      <PlantCardMenu
+                        plantId={plant.plant_id}
+                        plantName={plant.latin}
+                        username={username}
+                        onRemove={handleRemove}
+                      />
+                    )}
+                    {plant.plant_id ? (
+                      <Link href={`/plant/${plant.plant_id}`} className={cardClass}>
+                        {CardContent}
+                      </Link>
+                    ) : (
+                      <div className={cardClass}>{CardContent}</div>
+                    )}
                   </div>
                 );
               })}

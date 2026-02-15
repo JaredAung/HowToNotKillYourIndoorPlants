@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import { PlantCardMenu } from "../../components/PlantCardMenu";
 import { useEffect, useState } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -89,7 +90,11 @@ export default function PlantDetailPage() {
           ← Back to Garden
         </Link>
 
-        <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800/50">
+        <div className="relative overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800/50">
+          <PlantCardMenu
+            plantId={plant.plant_id}
+            plantName={plant.latin}
+          />
           {/* Image */}
           <div className="aspect-[4/3] w-full overflow-hidden bg-zinc-200 dark:bg-zinc-700">
             {plant.image_url ? (
