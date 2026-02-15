@@ -58,6 +58,37 @@ def _get_plants_collection():
     return MongoClient(uri)[database][PLANTS_COLLECTION]
 
 
+def _find_plant_by_name(coll, name: str) -> Optional[Dict[str, Any]]:
+    """Find a plant by common or latin name (case-insensitive, partial match)."""
+    name = (name or "").strip()
+    if not name:
+        return None
+    pattern = re.compile(re.escape(name), re.I)
+    for field in ("common", "latin"):
+        doc = coll.find_one({field: pattern})
+        if doc:
+            return doc
+    return None
+
+
+@tool
+def compare_plants(plant_a: str, plant_b: str) -> str:
+    """Compare two plants by name. Use when the user asks to compare plants (e.g. 'compare Croton and Monster cactus').
+    Returns care requirements, watering, light, size, and other details for both plants."""
+    coll = _get_plants_collection()
+    if coll is None:
+        return "MongoDB not configured. Cannot compare plants."
+    p1 = _find_plant_by_name(coll, plant_a)
+    p2 = _find_plant_by_name(coll, plant_b)
+    if not p1:
+        return f"Plant '{plant_a}' not found in the database."
+    if not p2:
+        return f"Plant '{plant_b}' not found in the database."
+    a_str = _format_plant(p1)
+    b_str = _format_plant(p2)
+    return f"**{', '.join(p1.get('common', []) or [p1.get('latin', 'Unknown')])}**\n{a_str}\n\n**{', '.join(p2.get('common', []) or [p2.get('latin', 'Unknown')])}**\n{b_str}"
+
+
 def _encode_user_from_profile(profile_answers: Dict[str, Any]) -> List[float]:
     """Encode user profile using trained UserTower. Uses vocabs from checkpoint (two_tower_vocabs.json)."""
     model, vocabs, _ = _load_two_tower()
@@ -278,12 +309,15 @@ def recommender_node(state: dict) -> dict:
         content = f"I had trouble formatting recommendations. ({e})"
 
     recommendations: List[Dict[str, Any]] = []
+    last_recommendations: List[Dict[str, Any]] = []
     if plants:
         explanations = _parse_llm_recommendations(content, len(plants))
-        for p, expl in zip(plants, explanations):
+        for i, (p, expl) in enumerate(zip(plants, explanations)):
             name = ", ".join(p.get("common", []) or [p.get("latin", "Unknown")])
             img = p.get("image_url") or p.get("img_url") or ""
             recommendations.append({"name": name, "image_url": img, "explanation": expl})
+            plant_id = str(p.get("_id", "")) if p.get("_id") else ""
+            last_recommendations.append({"rank": i + 1, "name": name, "plant_id": plant_id})
 
     greeting = _extract_greeting(content)
     # If LLM skipped the greeting, prepend a fallback
@@ -304,4 +338,5 @@ def recommender_node(state: dict) -> dict:
         "messages": [AIMessage(content=debug_prefix + content)],
         "recommendations": recommendations,
         "greeting": greeting,
+        "last_recommendations": last_recommendations,
     }
