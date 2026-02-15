@@ -59,13 +59,13 @@ async def get_user_info_questions(username: str = ""):
     return {"profile_exists": False, "questions": questions}
 
 
-# In-memory session store for chat state (use Redis/DB for production)
 _chat_sessions: dict[str, dict] = {}
 
 
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
+    username: str | None = None
 
 
 class PlantRecommendation(BaseModel):
@@ -77,32 +77,40 @@ class PlantRecommendation(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     session_id: str
-    recommendations: list[dict] = []  # Always return array; [{name, image_url, explanation}] when from recommender
+    recommendations: list[dict] = []
+    greeting: str | None = None  # intro before plant cards (when recommendations present)
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
-    """Send a message and get the agent's response. State is persisted by session_id."""
+async def chat(request: ChatRequest):
+    """Send a message and get the agent's response (sync, no streaming)."""
     if not request.message.strip():
         raise HTTPException(400, "message cannot be empty")
 
     session_id = request.session_id or str(uuid.uuid4())
     state = _chat_sessions.get(session_id, {"messages": []})
 
+    if not state.get("username") and not request.username:
+        state["username"] = request.message.strip()
+    elif request.username:
+        state["username"] = request.username
+
     state["messages"] = state.get("messages", []) + [{"role": "user", "content": request.message.strip()}]
-    state["recommendations"] = []  # Clear; recommender will set if applicable
+    state["recommendations"] = []
+
     result = graph_app.invoke(state)
     _chat_sessions[session_id] = result
 
-    print("[Chat API] Graph result keys:", list(result.keys()))
-    print("[Chat API] result['recommendations']:", result.get("recommendations"))
-
     last_ai = _get_last_ai_content(result.get("messages", []))
+    if not last_ai and result.get("username"):
+        pending = result.get("pending_questions") or []
+        last_ai = pending[0] if pending else "I'll help you find the perfect plants. What would you like to know?"
     recommendations = result.get("recommendations") or []
-    payload = {
-        "response": last_ai or "(no response)",
-        "session_id": session_id,
-        "recommendations": recommendations,
-    }
-    print("[Chat API] Sending to frontend:", payload)
-    return ChatResponse(**payload)
+    greeting = result.get("greeting")
+
+    return ChatResponse(
+        response=last_ai or "(no response)",
+        session_id=session_id,
+        recommendations=recommendations,
+        greeting=greeting,
+    )

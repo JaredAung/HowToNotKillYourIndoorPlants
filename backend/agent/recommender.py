@@ -4,6 +4,7 @@ Trained two-tower model: UserTower (profile -> embedding) vs PlantTower (itemTow
 Uses MongoDB Atlas Vector Search for retrieval.
 Vocabs loaded from checkpoint dir (two_tower_vocabs.json) to match trained model.
 """
+import json
 import os
 import re
 import sys
@@ -28,6 +29,8 @@ PLANTS_COLLECTION = os.getenv("MONGO_PLANTS_COLLECTION", os.getenv("MONGO_COLLEC
 EMBEDDING_FIELD = os.getenv("PLANT_EMBEDDING_FIELD", "itemTowerEmbeddings")
 VECTOR_INDEX = os.getenv("MONGO_VECTOR_INDEX", "item_emb_vector")
 TWO_TOWER_CKPT = os.getenv("TWO_TOWER_CKPT_PATH", str(_backend / "resources" / "trained_two_tower" / "two_tower_model.pt"))
+VOYAGE_RERANK_MODEL = os.getenv("VOYAGE_RERANK_MODEL", "rerank-2.5-lite")
+VOYAGE_RERANK_ENABLED = os.getenv("VOYAGE_RERANK_ENABLED", "true").lower() in ("true", "1", "yes")
 
 _model_vocabs_config: Optional[Tuple[Any, Dict[str, Dict[str, int]], Dict[str, Any]]] = None
 
@@ -78,6 +81,27 @@ def _format_plant(p: dict) -> str:
     )
 
 
+def _rerank_plants(
+    plants: List[Dict[str, Any]], query: str, top_k: int = 5
+) -> List[Dict[str, Any]]:
+    """Rerank plants using Voyage AI reranker. Returns top_k plants in relevance order."""
+    if not plants or len(plants) <= 1:
+        return plants[:top_k]
+    api_key = os.getenv("VOYAGE_API_KEY", "").strip()
+    if not api_key or not VOYAGE_RERANK_ENABLED:
+        return plants[:top_k]
+    try:
+        import voyageai
+        vo = voyageai.Client(api_key=api_key)
+        documents = [_format_plant(p) for p in plants]
+        result = vo.rerank(query=query, documents=documents, model=VOYAGE_RERANK_MODEL, top_k=min(top_k, len(plants)))
+        reordered = [plants[r.index] for r in result.results]
+        return reordered
+    except Exception as e:
+        print(f"[Reranker] Voyage rerank failed, using original order: {e}", flush=True)
+        return plants[:top_k]
+
+
 def _vector_search(coll, user_embedding: list[float], top_k: int = 5) -> list[dict]:
     """Run MongoDB Atlas Vector Search. Returns top-k plants."""
     num_candidates = min(10000, max(top_k * 20, 100))
@@ -101,6 +125,7 @@ def _two_tower_retrieve(
 ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
     """Retrieve plants using trained UserTower embedding vs itemTowerEmbeddings in MongoDB.
     Returns (plants_str, plants_list) on success, or (error_str, None) on failure."""
+    print("[Two-tower] _two_tower_retrieve ENTERED", flush=True)
     coll = _get_plants_collection()
     if coll is None:
         return "MongoDB not configured. MONGO_URI not set.", None
@@ -112,8 +137,10 @@ def _two_tower_retrieve(
     except Exception as e:
         return f"Failed to encode user profile: {e}", None
 
+    # Fetch more candidates when reranker enabled for better reranking
+    fetch_k = 12 if (VOYAGE_RERANK_ENABLED and os.getenv("VOYAGE_API_KEY", "").strip()) else top_k
     try:
-        top = _vector_search(coll, user_vec, top_k=top_k)
+        top = _vector_search(coll, user_vec, top_k=fetch_k)
     except Exception as e:
         err = str(e).lower()
         if "index" in err or "vector" in err or "vectorsearch" in err:
@@ -143,21 +170,52 @@ def two_tower_inference(profile_answers: str, top_k: int = 5) -> str:
     return plants_str
 
 
+_SIGNOFF_PATTERNS = [
+    r"\s*<[^>]*[Ll]et me know[^>]*>\s*$",
+    r"\s*[Ll]et me know if you have any questions[^.!]*[.!]?\s*$",
+    r"\s*[Ff]eel free to ask[^.!]*[.!]?\s*$",
+    r"\s*[Ii]f you have any questions[^.!]*[.!]?\s*$",
+    r"\s*[Hh]appy (?:planting|gardening)[^.!]*[.!]?\s*$",
+]
+
+
+def _strip_signoff(expl: str) -> str:
+    """Remove LLM sign-off phrases from end of explanation."""
+    s = expl.strip()
+    for pat in _SIGNOFF_PATTERNS:
+        s = re.sub(pat, "", s)
+    return s.strip()
+
+
+def _extract_greeting(content: str) -> str:
+    """Extract greeting/intro text before the first numbered plant. Ensures LLM greeting is not lost."""
+    if not content or not content.strip():
+        return ""
+    # Match everything before first "1. **" or "1. " (start of numbered plant list)
+    match = re.search(r"^(.*?)(?=\d+\.\s+(?:\*\*)?)", content, re.DOTALL)
+    if match:
+        greeting = match.group(1).strip()
+        # Remove debug prefix if present
+        if greeting.startswith("[DEBUG]"):
+            idx = greeting.find("\n\n")
+            if idx >= 0:
+                greeting = greeting[idx + 2 :].strip()
+        return greeting
+    return ""
+
+
 def _parse_llm_recommendations(content: str, num_plants: int) -> List[str]:
-    """Extract per-plant explanation blocks from LLM output. Returns list of explanation strings in order."""
-    blocks = re.split(r"(?:\n|^)\d+\.\s+\*\*", content)
-    blocks = [b.strip() for b in blocks if b.strip()]
-    if not blocks:
-        return [""] * num_plants
-    plant_blocks = blocks[:num_plants]
+    """Extract per-plant explanation blocks from LLM output. Handles:
+    - 1. **Plant**: explanation on same line
+    - 1. **Plant**\nexplanation on next line(s)
+    """
     explanations: List[str] = []
-    for block in plant_blocks:
-        if "**" in block:
-            parts = block.split("**", 2)
-            block = parts[-1].strip() if len(parts) >= 2 else block
-            if block.startswith(": "):
-                block = block[2:]
-        explanations.append(block.strip() if block else "")
+    # Match N. **PlantName** or N. PlantName, then capture explanation (same line after : or on following lines) until next plant
+    pattern = r"\d+\.\s+(?:\*\*)?[^*\n]+(?:\*\*)?\s*(?::\s*)?([\s\S]*?)(?=\d+\.\s+(?:\*\*)?|\Z)"
+    matches = re.findall(pattern, content)
+    for m in matches[:num_plants]:
+        expl = _strip_signoff(m.strip())
+        explanations.append(expl if expl else "")
     while len(explanations) < num_plants:
         explanations.append("")
     return explanations[:num_plants]
@@ -165,15 +223,19 @@ def _parse_llm_recommendations(content: str, num_plants: int) -> List[str]:
 
 def recommender_node(state: dict) -> dict:
     """Generate plant recommendations using trained two-tower model (UserTower vs itemTowerEmbeddings)."""
+    print("[Recommender] recommender_node ENTERED", flush=True)
     profile_answers = state.get("profile_answers") or {}
+    username = state.get("username") or ""
 
     try:
-        plants_str, plants = _two_tower_retrieve(profile_answers, top_k=5)
+        plants_str, plants = _two_tower_retrieve(profile_answers, top_k=3)
     except Exception as e:
         return {"messages": [AIMessage(content=f"I had trouble fetching recommendations. ({e})")]}
 
     if "not configured" in plants_str or "vector search failed" in plants_str or "No matching" in plants_str or "not found" in plants_str.lower():
         return {"messages": [AIMessage(content=plants_str)]}
+    if not plants:
+        return {"messages": [AIMessage(content=plants_str or "No plants retrieved from the database.")]}
 
     user_features = ", ".join(f"{k}: {v}" for k, v in profile_answers.items() if v)
     messages = state.get("messages", [])
@@ -187,12 +249,23 @@ def recommender_node(state: dict) -> dict:
     if not prompt_text or "what kind" in prompt_text.lower() or "interested" in prompt_text.lower():
         prompt_text = "Based on my profile, what plants do you recommend?"
 
+    # Voyage AI reranker: refine order by relevance to query (profile + intent)
+    rerank_query = f"{prompt_text}. User profile: {user_features}"
+    plants = _rerank_plants(plants, rerank_query, top_k=3)
+    plants_str = "\n\n".join(_format_plant(p) for p in plants) if plants else "No matching plants found."
+
+    greeting_instruction = (
+        f"Start with a brief personalized greeting (e.g. 'Hi {username}! Based on your preferences, here are 3 plants I think you'd like:') "
+        if username else "Start with a brief greeting before the plant list. "
+    )
     system = (
         f"You are a plant care expert. The user's profile: {user_features}. "
         "Here are plants retrieved by the trained two-tower model (UserTower vs itemTowerEmbeddings):\n\n"
         f"{plants_str}\n\n"
-        "Present 3 of the retrieved plants with why each fits their profile and one care tip. "
-        "Use numbered format: 1. **Plant name**: explanation... * Care tip: ..."
+        f"{greeting_instruction}"
+        "Then present 3 of the retrieved plants with why each fits their profile and one care tip. "
+        "Use numbered format: 1. **Plant name**: explanation... * Care tip: ... "
+        "Do NOT add sign-off phrases like 'Let me know if you have any questions' at the end."
     )
     llm = get_ollama_llm(temperature=0.5)
     try:
@@ -212,7 +285,23 @@ def recommender_node(state: dict) -> dict:
             img = p.get("image_url") or p.get("img_url") or ""
             recommendations.append({"name": name, "image_url": img, "explanation": expl})
 
+    greeting = _extract_greeting(content)
+    # If LLM skipped the greeting, prepend a fallback
+    if not greeting and username:
+        greeting = f"Hi {username}! Based on your preferences, here are 3 plants I think you'd like:"
+    elif not greeting:
+        greeting = "Based on your preferences, here are 3 plants I think you'd like:"
+
+    extracted = {
+        "node": "recommender",
+        "two_tower_called": True,
+        "profile_answers_keys": list(profile_answers.keys()),
+        "plants_count": len(plants) if plants else 0,
+        "recommendations_count": len(recommendations),
+    }
+    debug_prefix = f"[DEBUG] {json.dumps(extracted, indent=2)}\n\n"
     return {
-        "messages": [AIMessage(content=content)],
+        "messages": [AIMessage(content=debug_prefix + content)],
         "recommendations": recommendations,
+        "greeting": greeting,
     }

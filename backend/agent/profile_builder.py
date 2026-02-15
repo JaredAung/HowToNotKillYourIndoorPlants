@@ -3,11 +3,18 @@ Profile builder agent: schema, extraction, and profile collection logic.
 Collects user plant preferences via freeform text + follow-up questions.
 """
 import json
+import os
+from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage
+from pymongo import MongoClient
 
 from agent.llm import get_ollama_llm
+
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # Valid use values from house_plants_enriched_schema.json (placement/style)
 USE_VALUES = [
@@ -217,14 +224,42 @@ def _get_null_fields(answers: dict) -> list[str]:
     return [k for k in QUESTION_TO_SCHEMA_KEY if answers.get(k) is None or str(answers.get(k)).strip() == ""]
 
 
+def _get_user_profiles_collection():
+    """Get MongoDB user profiles collection."""
+    uri = os.getenv("MONGO_URI", "").strip().strip('"')
+    database = os.getenv("MONGO_DATABASE", "HowNotToKillYourPlants")
+    collection_name = os.getenv("MONGO_USER_PROFILES_COLLECTION", "UserProfiles")
+    if not uri:
+        return None
+    return MongoClient(uri)[database][collection_name]
+
+
+def _save_profile_to_db(username: str, preferences: dict) -> bool:
+    """Upsert user profile to MongoDB. Returns True if saved."""
+    coll = _get_user_profiles_collection()
+    if coll is None:
+        return False
+    try:
+        coll.update_one(
+            {"username": username},
+            {"$set": {"username": username, "preferences": preferences}},
+            upsert=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _complete_profile(answers: dict, username: str) -> dict:
     """Save profile to Mongo, reiterate captured info, return completion state. Keeps profile_answers so reasoning agent can use them."""
     filled = {k: v for k, v in answers.items() if v is not None and str(v).strip()}
+    saved = _save_profile_to_db(username, filled) if username else False
     profile_summary = "\n".join(f"  • {k}: {v}" for k, v in filled.items())
+    save_note = "Profile saved!" if saved else "(Not saved—MongoDB not configured.)"
     completion_msg = (
         "Here's the information I've captured:\n\n"
         f"**{username}'s Profile**\n{profile_summary}\n\n"
-        "(Not saved to database yet.) Let me recommend some plants for you..."
+        f"{save_note} Let me recommend some plants for you..."
     )
     return {
         "messages": [AIMessage(content=completion_msg)],
